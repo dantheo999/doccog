@@ -1,0 +1,31 @@
+# GPU variant for NuExtract3: replaces the CPU llama.cpp service with vLLM (NVIDIA GPU + container toolkit).
+# Usage: docker compose -f compose.yaml -f compose.gpu.yaml up --build -d
+# Untested in this prototype's development environment (no GPU there). If vLLM rejects log-probabilities
+# with speculative decoding, remove the --speculative-config pair.
+services:
+  nuextract:
+    image: vllm/vllm-openai:latest
+    command: ["numind/NuExtract3", "--served-model-name", "numind/NuExtract3", "--trust-remote-code",
+              "--limit-mm-per-prompt", "{\"image\": 8, \"video\": 0}", "--chat-template-content-format", "openai",
+              "--generation-config", "vllm", "--max-model-len", "32768",
+              "--speculative-config", "{\"method\": \"qwen3_next_mtp\", \"num_speculative_tokens\": 2}",
+              "--host", "0.0.0.0", "--port", "8080"]
+    environment:
+      HF_HOME: /models
+    volumes:
+      - nuextract-models:/models
+    ipc: host
+    mem_limit: 32g
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30m

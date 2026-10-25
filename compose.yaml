@@ -36,11 +36,14 @@ services:
       retries: 3
       start_period: 20s
 
-  # NuExtract3 on CPU via llama.cpp. The ~2.7 GB GGUF downloads into the model volume on first start.
-  # For a GPU, see compose.gpu.yaml (vLLM).
+  # NuExtract3 on CPU via llama.cpp. The first start downloads ~3.5 GB (Q4_K_M GGUF + vision projector)
+  # into the model volume. --spec-type draft-mtp uses the model's multi-token-prediction head (~1.7x faster).
+  # Set NUEXTRACT_THREADS to the cores you can dedicate; llama.cpp slows sharply when oversubscribed.
+  # For a GPU, use compose.gpu.yaml (vLLM) instead.
   nuextract:
     image: ghcr.io/ggml-org/llama.cpp:server
-    command: ["-hf", "numind/NuExtract3-GGUF:Q4_K_M", "--jinja", "-c", "32768", "-np", "1",
+    command: ["-hf", "numind/NuExtract3-GGUF:Q4_K_M", "--jinja", "--alias", "numind/NuExtract3",
+              "-c", "32768", "-np", "1", "-t", "${NUEXTRACT_THREADS:-4}", "--spec-type", "draft-mtp",
               "--host", "0.0.0.0", "--port", "8080"]
     environment:
       LLAMA_CACHE: /models
@@ -50,12 +53,13 @@ services:
       - "8080"
     init: true
     mem_limit: ${NUEXTRACT_MEM_LIMIT:-8g}
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fs", "http://127.0.0.1:8080/health"]
       interval: 30s
       timeout: 5s
       retries: 5
-      start_period: 15m
+      start_period: 20m
 
   frontend:
     build: ./frontend
