@@ -1,0 +1,15 @@
+MANAGED SERVICES AGREEMENT
+
+This agreement is between Cedar Health Group and Meridian Systems Ltd.
+Elena Patel is the account owner at Meridian Systems Ltd.
+
+Meridian Systems Ltd will keep operational audit logs for 12 months and remove
+expired logs within seven days. The Security Operations Lead owns this control.
+
+Under the Australian Privacy Principles, Cedar Health Group must respond to
+access requests within a reasonable period. Its Privacy Manager, Oliver Grant,
+is responsible for reviewing and responding to each request.
+
+Meridian Systems Ltd must report confirmed data breaches to Cedar Health Group
+within 48 hours. The incident notice must include affected systems, dates,
+containment actions and a named incident coordinator.
