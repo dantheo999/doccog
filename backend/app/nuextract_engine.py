@@ -26,6 +26,14 @@ not accept images, so for vLLM (or any non-llama.cpp server) image requests go t
 ``/v1/chat/completions`` with ``chat_template_kwargs`` and ``developer`` messages,
 which vLLM renders with the model's own template.
 
+Template generation
+-------------------
+:func:`generate_template` uses the chat template's ``template-generation`` mode
+(same self-rendered prompt + ``/v1/completions`` path). That mode has one input
+slot, so a natural-language description and exemplar document(s) are
+concatenated (description first). :func:`template_to_fields` turns the result
+into the app's schema fields.
+
 Confidence scores
 -----------------
 Each generated token's logprob is mapped onto a character span of the generated
@@ -49,6 +57,7 @@ import json
 import math
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -58,13 +67,17 @@ __all__ = [
     "NuExtractError",
     "NuExtractOutput",
     "NuExtractSettings",
+    "TemplateOutput",
     "extract",
+    "generate_template",
     "leaf_confidences",
     "parse_json_with_spans",
     "render_prompt",
+    "render_template_generation_prompt",
     "schema_instructions",
     "schema_to_template",
     "server_status",
+    "template_to_fields",
 ]
 
 VISION_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
@@ -890,22 +903,262 @@ def _build_output(payload: dict, *, use_chat: bool, enable_thinking: bool, max_t
             reasoning, answer = generated.strip() or None, ""
     raw = answer.strip()
     data = _parse_answer(raw)
+    usage, timings = _usage_and_timings(payload)
+    if data is None and strict:
+        _raise_unparsed(finish, raw, generated, max_tokens=max_tokens, thinking=enable_thinking,
+                        hint="Raise max_tokens or reduce the schema/document size.")
+    confidences = _confidences_for_answer(data, generated, choice.get("logprobs")) if data is not None else {}
+    return NuExtractOutput(data=data, raw=raw, reasoning=reasoning, confidences=confidences,
+                           finish_reason=finish, usage=usage, elapsed_seconds=round(elapsed, 3),
+                           timings=timings, transport="chat" if use_chat else "completions")
+
+
+def _usage_and_timings(payload: dict) -> tuple[dict, dict]:
     usage_in = payload.get("usage") or {}
     timings = payload.get("timings") if isinstance(payload.get("timings"), dict) else {}
     usage = {
         "prompt_tokens": int(usage_in.get("prompt_tokens") or timings.get("prompt_n") or 0),
         "completion_tokens": int(usage_in.get("completion_tokens") or timings.get("predicted_n") or 0),
     }
-    if data is None and strict:
-        if finish == "length":
-            where = " while still reasoning" if enable_thinking and not raw else ""
-            raise NuExtractError(
-                f"NuExtract stopped at the max_tokens limit ({max_tokens}){where} before finishing its "
-                "JSON answer. Raise max_tokens or reduce the schema/document size.",
-                kind="truncated", raw=raw or generated)
-        raise NuExtractError("NuExtract returned an answer that is not a valid JSON object.",
-                             kind="invalid_json", raw=raw or generated)
-    confidences = _confidences_for_answer(data, generated, choice.get("logprobs")) if data is not None else {}
-    return NuExtractOutput(data=data, raw=raw, reasoning=reasoning, confidences=confidences,
-                           finish_reason=finish, usage=usage, elapsed_seconds=round(elapsed, 3),
-                           timings=dict(timings), transport="chat" if use_chat else "completions")
+    return usage, dict(timings)
+
+
+def _raise_unparsed(finish: str | None, raw: str, generated: str, *, max_tokens: int, thinking: bool,
+                    hint: str) -> None:
+    if finish == "length":
+        where = " while still reasoning" if thinking and not raw else ""
+        raise NuExtractError(
+            f"NuExtract stopped at the max_tokens limit ({max_tokens}){where} before finishing its "
+            f"JSON answer. {hint}", kind="truncated", raw=raw or generated)
+    raise NuExtractError("NuExtract returned an answer that is not a valid JSON object.",
+                         kind="invalid_json", raw=raw or generated)
+
+
+# --------------------------------------------------------------------------- #
+# Template generation (chat template mode "template-generation")
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class TemplateOutput:
+    template: dict | None  # generated NuExtract template (None if unparseable and strict=False)
+    raw: str  # answer text, thinking removed
+    reasoning: str | None
+    usage: dict  # {"prompt_tokens": int, "completion_tokens": int}
+    elapsed_seconds: float
+    finish_reason: str | None = None
+    timings: dict = field(default_factory=dict)
+
+
+def render_template_generation_prompt(*, text: str | None = None, description: str = "",
+                                      enable_thinking: bool = False) -> str:
+    """Prompt for ``mode="template-generation"``.
+
+    The chat template has a single input slot for this mode: every user content
+    part goes between 【document_start】 and 【document_end】, joined with "\\n"
+    (``instructions`` and examples are ignored in this mode). A description and a
+    document are therefore concatenated, description first. The official template
+    rejects ``enable_thinking=True`` for this mode; here it is allowed as an
+    explicit opt-in (the prompt then ends with an open ``<think>``).
+    """
+    parts = [p for p in (description.strip() if description else "", text) if p]
+    content = "".join(p + "\n" for p in parts).strip()
+    return ("<|im_start|>user\n【task】template generation\n【document_start】\n" + content
+            + "\n【document_end】<|im_end|>\n<|im_start|>assistant\n"
+            + ("<think>\n" if enable_thinking else "<think>\n\n</think>\n\n"))
+
+
+def generate_template(settings: NuExtractSettings, *, text: str | None = None, description: str = "",
+                      enable_thinking: bool = False, temperature: float = 0.2, max_tokens: int = 4096,
+                      strict: bool = True) -> TemplateOutput:
+    """Ask NuExtract3 to propose an extraction template.
+
+    ``description`` is natural-language guidance ("meeting minutes: attendees with
+    roles..."), ``text`` an exemplar document (several exemplars can be joined with
+    blank lines). Either or both may be given. Convert the result with
+    :func:`template_to_fields`. Raises ``NuExtractError`` like :func:`extract`.
+    """
+    if not (text and text.strip()) and not (description and description.strip()):
+        raise NuExtractError("Provide a description and/or an exemplar document.", kind="invalid_input")
+    if max_tokens < 1:
+        raise NuExtractError("max_tokens must be positive.", kind="invalid_input")
+    prompt = render_template_generation_prompt(text=text, description=description, enable_thinking=enable_thinking)
+    started = time.monotonic()
+    with _make_client(settings) as client:
+        payload = _post_json(client, "completions", {
+            "model": settings.model, "prompt": prompt, "max_tokens": max_tokens,
+            "temperature": temperature, "stream": False}, settings)
+    elapsed = time.monotonic() - started
+    choice = payload["choices"][0] if isinstance(payload["choices"][0], dict) else {}
+    finish = choice.get("finish_reason")
+    generated = choice.get("text") or ""
+    reasoning, answer, _ = split_thinking(generated)
+    if enable_thinking and reasoning is None and THINK_CLOSE not in generated:
+        reasoning, answer = generated.strip() or None, ""
+    raw = answer.strip()
+    template = _parse_answer(raw)
+    if template is not None and not template:
+        template = None
+    usage, timings = _usage_and_timings(payload)
+    if template is None and strict:
+        _raise_unparsed(finish, raw, generated, max_tokens=max_tokens, thinking=enable_thinking,
+                        hint="Raise max_tokens or shorten the exemplar.")
+    return TemplateOutput(template=template, raw=raw, reasoning=reasoning, usage=usage,
+                          elapsed_seconds=round(elapsed, 3), finish_reason=finish, timings=timings)
+
+
+# NuExtract leaf type -> (app field type, description hint)
+_TEMPLATE_TYPES: dict[str, tuple[str, str]] = {
+    "verbatim-string": ("verbatim", ""),
+    "string": ("text", ""),
+    "": ("text", ""),
+    "date": ("date", ""),
+    "date-time": ("date", ""),  # app dates are ISO dates; times are dropped
+    "time": ("text", "time (ISO 8601, e.g. 14:30)"),
+    "duration": ("text", "duration (ISO 8601, e.g. P3D)"),
+    "number": ("number", ""),
+    "integer": ("integer", ""),
+    "boolean": ("boolean", ""),
+    "email-address": ("verbatim", "email address"),
+    "url": ("verbatim", "URL"),
+    "phone-number": ("text", "phone number (E.164 when the country code is known)"),
+    "iban": ("text", "IBAN"),
+    "bic": ("text", "BIC/SWIFT code"),
+    "country": ("text", "country (ISO 3166-1 alpha-2 code)"),
+    "currency": ("text", "currency (ISO 4217 code)"),
+    "language": ("text", "language (ISO 639-3 code)"),
+    "language-tag": ("text", "language tag (BCP 47)"),
+    "script": ("text", "script (ISO 15924 code)"),
+    "unit-code": ("text", "unit of measure (UCUM code)"),
+}
+MAX_FIELD_DEPTH = 3
+_MAX_TOP_FIELDS, _MAX_CHILD_FIELDS, _MAX_OPTIONS, _MAX_OPTION_LEN = 60, 40, 50, 200
+_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+def template_to_fields(template: dict, *, unwrap_root: bool = True) -> list[dict]:
+    """Convert a NuExtract template into the app's schema fields (inverse of schema_to_template).
+
+    * keys become lower_snake_case names matching ``^[a-z][a-z0-9_]{0,63}$``, deduplicated;
+    * verbatim-string -> verbatim, string -> text, date/date-time -> date, number,
+      integer, boolean as is; other NuExtract types (time, currency, email-address,
+      country, ...) -> text or verbatim with the type described in ``description``;
+    * ``["a", "b"]`` -> enum, ``[["a", "b"]]`` -> enum array, ``[x]`` -> array of x,
+      ``{...}`` -> object, ``[{...}]`` -> object array; empty objects are dropped;
+    * a template that is a single object under one key (``{"Meeting": {...}}``, as
+      the model often writes) is unwrapped when ``unwrap_root``;
+    * nesting is capped at three levels: a single object that would go deeper is
+      flattened into prefixed sibling fields, an array of objects becomes a text array.
+    """
+    if not isinstance(template, dict):
+        raise ValueError("A NuExtract template must be a JSON object.")
+    if unwrap_root and len(template) == 1:
+        (only,) = template.values()
+        if isinstance(only, dict) and only:
+            template = only
+    return _template_fields(template, level=1, limit=_MAX_TOP_FIELDS)
+
+
+def _template_fields(node: dict, *, level: int, limit: int) -> list[dict]:
+    fields: list[dict] = []
+    used: set[str] = set()
+    for key, value in node.items():
+        for field_ in _expand(_snake_name(key), value, level):
+            if len(fields) >= limit:
+                return fields
+            field_["name"] = _unique_name(field_["name"], used)
+            used.add(field_["name"])
+            fields.append(field_)
+    return fields
+
+
+def _new_field(name: str, ftype: str, *, array: bool = False, description: str = "",
+               options: list[str] | None = None, fields: list[dict] | None = None) -> dict:
+    return {"name": name, "type": ftype, "description": description, "array": array,
+            "options": options or [], "fields": fields or []}
+
+
+def _expand(name: str, value: Any, level: int) -> list[dict]:
+    """Fields for one template entry (several when an over-deep object is flattened)."""
+    if isinstance(value, dict):
+        if not value:
+            return []
+        if level >= MAX_FIELD_DEPTH:  # children would exceed the nesting limit: flatten
+            out: list[dict] = []
+            for key, child in value.items():
+                out.extend(_expand(_snake_name(f"{name}_{_snake_name(key)}"), child, level))
+            return out
+        children = _template_fields(value, level=level + 1, limit=_MAX_CHILD_FIELDS)
+        return [_new_field(name, "object", fields=children)] if children else []
+    if isinstance(value, list):
+        if len(value) == 1 and isinstance(value[0], list):  # multi-enum [["a", "b"]]
+            options = _clean_options(value[0])
+            return [_new_field(name, "enum", array=True, options=options) if options
+                    else _new_field(name, "text", array=True)]
+        if len(value) >= 2 and all(isinstance(v, (str, int, float)) and not isinstance(v, bool) for v in value):
+            options = _clean_options(value)
+            return [_new_field(name, "enum", options=options) if options else _new_field(name, "text")]
+        if value and isinstance(value[0], dict):
+            item = value[0]
+            if not item:
+                return []
+            if level >= MAX_FIELD_DEPTH:
+                keys = ", ".join(str(k) for k in list(item)[:8])
+                return [_new_field(name, "text", array=True, description=f"summary of: {keys}"[:1000])]
+            children = _template_fields(item, level=level + 1, limit=_MAX_CHILD_FIELDS)
+            return [_new_field(name, "object", array=True, fields=children)] if children else []
+        if len(value) == 1:
+            ftype, hint = _leaf_type(value[0])
+            return [_new_field(name, ftype, array=True, description=hint)]
+        return [_new_field(name, "text", array=True)]
+    ftype, hint = _leaf_type(value)
+    return [_new_field(name, ftype, description=hint)]
+
+
+def _leaf_type(value: Any) -> tuple[str, str]:
+    if not isinstance(value, str):
+        return "text", ""
+    key = value.strip().lower()
+    if key in _TEMPLATE_TYPES:
+        return _TEMPLATE_TYPES[key]
+    if key.startswith("region:"):
+        return "text", f"region (ISO 3166-2:{value.strip()[7:].upper()} subdivision code)"
+    return "text", f"type: {value.strip()}"[:1000]
+
+
+def _clean_options(values: Iterable[Any]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in values:
+        if isinstance(v, (dict, list)) or v is None:
+            continue
+        option = " ".join(str(v).split())[:_MAX_OPTION_LEN].strip()
+        if option and option.casefold() not in seen:
+            seen.add(option.casefold())
+            out.append(option)
+        if len(out) >= _MAX_OPTIONS:
+            break
+    return out
+
+
+def _snake_name(key: Any) -> str:
+    s = unicodedata.normalize("NFKD", str(key)).encode("ascii", "ignore").decode("ascii")
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s)
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", s)
+    s = re.sub(r"[^A-Za-z0-9]+", "_", s).strip("_").lower()
+    if not s:
+        s = "field"
+    if not s[0].isalpha():
+        s = "f_" + s
+    return s[:64].rstrip("_")
+
+
+def _unique_name(name: str, used: set[str]) -> str:
+    if name not in used:
+        return name
+    n = 2
+    while True:
+        suffix = f"_{n}"
+        candidate = name[:64 - len(suffix)].rstrip("_") + suffix
+        if candidate not in used:
+            return candidate
+        n += 1

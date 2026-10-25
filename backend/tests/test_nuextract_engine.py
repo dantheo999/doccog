@@ -482,3 +482,137 @@ def test_server_status_never_raises(monkeypatch):
 
     monkeypatch.setattr(ne, "_make_client", lambda settings, timeout=None: (_ for _ in ()).throw(RuntimeError()))
     assert ne.server_status(SETTINGS)["available"] is False
+
+
+# --------------------------------------------------------------------------- template generation
+
+def test_render_template_generation_prompt_matches_chat_template():
+    # Golden strings rendered by jinja2 with mode="template-generation".
+    assert ne.render_template_generation_prompt(
+        description="I want to extract the key details from a rental contract.") == (
+        "<|im_start|>user\n【task】template generation\n【document_start】\n"
+        "I want to extract the key details from a rental contract.\n【document_end】<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n\n</think>\n\n")
+    assert ne.render_template_generation_prompt(description="Describe: minutes", text="DOC TEXT") == (
+        "<|im_start|>user\n【task】template generation\n【document_start】\nDescribe: minutes\nDOC TEXT\n"
+        "【document_end】<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
+    assert ne.render_template_generation_prompt(text="doc", enable_thinking=True).endswith("assistant\n<think>\n")
+
+
+GENERATED = '{\n    "Meeting": {\n        "Date": "date-time",\n        "Attendees": [\n            {"Name": "verbatim-string"}\n        ]\n    }\n}'
+
+
+def test_generate_template_parses_answer_and_sends_template_generation_prompt(fake):
+    server = fake({("POST", "/v1/completions"): completion("```json\n" + GENERATED + "\n```", usage=(48, 30))})
+    out = ne.generate_template(SETTINGS, text="Minutes of the board.", description="meeting minutes")
+    assert out.template == {"Meeting": {"Date": "date-time", "Attendees": [{"Name": "verbatim-string"}]}}
+    assert out.raw.startswith("```json") and out.reasoning is None and out.finish_reason == "stop"
+    assert out.usage == {"prompt_tokens": 48, "completion_tokens": 30}
+    body = server.requests[-1][2]
+    assert body["prompt"] == ne.render_template_generation_prompt(text="Minutes of the board.",
+                                                                  description="meeting minutes")
+    assert "【task】template generation" in body["prompt"] and body["temperature"] == 0.2
+
+
+def test_generate_template_thinking_and_errors(fake):
+    fake({("POST", "/v1/completions"): completion("Fields needed.\n</think>\n\n" + GENERATED)})
+    out = ne.generate_template(SETTINGS, description="minutes", enable_thinking=True)
+    assert out.reasoning == "Fields needed." and out.template["Meeting"]["Date"] == "date-time"
+
+    with pytest.raises(ne.NuExtractError, match="description and/or an exemplar") as info:
+        ne.generate_template(SETTINGS, text="  ", description="")
+    assert info.value.kind == "invalid_input"
+
+    fake({("POST", "/v1/completions"): completion('{"Meeting": {"Date": "da', finish="length")})
+    with pytest.raises(ne.NuExtractError, match="max_tokens limit") as info:
+        ne.generate_template(SETTINGS, description="minutes", max_tokens=64)
+    assert info.value.kind == "truncated"
+    assert ne.generate_template(SETTINGS, description="minutes", strict=False).template is None
+
+    for answer in ("Sorry, no template.", "{}"):
+        fake({("POST", "/v1/completions"): completion(answer)})
+        with pytest.raises(ne.NuExtractError, match="not a valid JSON object") as info:
+            ne.generate_template(SETTINGS, description="minutes")
+        assert info.value.kind == "invalid_json"
+
+
+# --------------------------------------------------------------------------- template -> app fields
+
+def _f(name, ftype, *, array=False, description="", options=(), fields=()):
+    return {"name": name, "type": ftype, "description": description, "array": array,
+            "options": list(options), "fields": list(fields)}
+
+
+def test_template_to_fields_maps_types_and_constructors():
+    template = {
+        "Title": "verbatim-string", "Summary": "string", "Date": "date", "Starts": "date-time",
+        "Total": "number", "Count": "integer", "Approved": "boolean",
+        "Status": ["open", "closed"], "Tags": [["a", "b"]], "Emails": ["email-address"],
+        "Currency": "currency", "Region": "region:GB", "Start time": "time", "Odd": "colour",
+        "Items": [{"Name": "verbatim-string", "Qty": "integer"}], "Venue": {"Room": "verbatim-string"},
+    }
+    assert ne.template_to_fields(template) == [
+        _f("title", "verbatim"), _f("summary", "text"), _f("date", "date"), _f("starts", "date"),
+        _f("total", "number"), _f("count", "integer"), _f("approved", "boolean"),
+        _f("status", "enum", options=["open", "closed"]),
+        _f("tags", "enum", array=True, options=["a", "b"]),
+        _f("emails", "verbatim", array=True, description="email address"),
+        _f("currency", "text", description="currency (ISO 4217 code)"),
+        _f("region", "text", description="region (ISO 3166-2:GB subdivision code)"),
+        _f("start_time", "text", description="time (ISO 8601, e.g. 14:30)"),
+        _f("odd", "text", description="type: colour"),
+        _f("items", "object", array=True, fields=[_f("name", "verbatim"), _f("qty", "integer")]),
+        _f("venue", "object", fields=[_f("room", "verbatim")]),
+    ]
+
+
+def test_template_to_fields_sanitises_and_dedupes_names():
+    fields = ne.template_to_fields({"Invoice Number": "string", "invoiceNumber": "string", "HTTPServer": "url",
+                                    "Montant TTC (€)": "number", "2nd party": "string", "!!!": "string",
+                                    "x" * 80: "string", "Café": "string"})
+    names = [f["name"] for f in fields]
+    assert names == ["invoice_number", "invoice_number_2", "http_server", "montant_ttc", "f_2nd_party",
+                     "field", "x" * 64, "cafe"]
+    assert all(ne._NAME_RE.match(n) for n in names)
+
+
+def test_template_to_fields_unwraps_root_caps_depth_and_drops_empty_objects():
+    template = {"Meeting": {
+        "Agenda Items": [{"Item": "verbatim-string",
+                          "Action": {"Owner": "verbatim-string", "Due": {"Date": "date"}},
+                          "Votes": [{"Member": "string"}]}],
+        "Empty": {}, "Empty list": [{}], "Notes": ["string"],
+    }}
+    assert ne.template_to_fields(template) == [
+        _f("agenda_items", "object", array=True, fields=[
+            _f("item", "verbatim"),
+            _f("action", "object", fields=[_f("owner", "verbatim"), _f("due_date", "date")]),
+            _f("votes", "object", array=True, fields=[_f("member", "text")]),
+        ]),
+        _f("notes", "text", array=True),
+    ]
+    # without unwrapping, the root counts as a level: deeper objects flatten / become text
+    wrapped = ne.template_to_fields(template, unwrap_root=False)
+    agenda = wrapped[0]["fields"][0]
+    assert [f["name"] for f in agenda["fields"]] == ["item", "action_owner", "action_due_date", "votes"]
+    assert agenda["fields"][3] == _f("votes", "text", array=True, description="summary of: Member")
+
+
+def test_template_to_fields_cleans_enum_options():
+    fields = ne.template_to_fields({"a": ["Yes", "yes", " No ", ""], "b": [[" x ", "X", None]], "c": [1, 2],
+                                    "d": ["", ""]})
+    assert fields == [_f("a", "enum", options=["Yes", "No"]), _f("b", "enum", array=True, options=["x"]),
+                      _f("c", "enum", options=["1", "2"]), _f("d", "text")]
+    with pytest.raises(ValueError):
+        ne.template_to_fields(["not", "a", "dict"])
+
+
+def test_template_round_trips_with_schema_to_template():
+    template = {"title": "verbatim-string", "date": "date", "people": [{"name": "verbatim-string",
+                "attendance": ["present", "apologies"], "notes": ["string"]}], "topics": [["a", "b", "c"]],
+                "budget": "number", "venue": {"room": "verbatim-string"}}
+    assert ne.schema_to_template(ne.template_to_fields(template)) == template
+    plain = [{**f, "description": ""} for f in MINUTES]
+    for f in plain:
+        f["fields"] = [{**c, "description": ""} for c in f.get("fields", [])]
+    assert ne.schema_to_template(ne.template_to_fields(ne.schema_to_template(plain))) == ne.schema_to_template(plain)
