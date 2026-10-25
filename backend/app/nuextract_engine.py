@@ -18,11 +18,13 @@ the default for every request because:
 * The rendered prompt is byte-identical on llama.cpp and vLLM, and both return
   per-token logprobs from ``/v1/completions``.
 
-Images use the same path on llama.cpp (``{"prompt_string", "multimodal_data"}``
-with the server's media marker from ``GET /props``). vLLM's completions endpoint
-does not accept images, so for vLLM (or any non-llama.cpp server) image requests
-go to ``/v1/chat/completions`` with ``chat_template_kwargs`` and ``developer``
-messages, which vLLM renders with the model's own template.
+Images on llama.cpp use the same self-rendered prompt, sent to llama.cpp's native
+``POST /completions`` (``{"prompt_string", "multimodal_data"}`` with the server's
+media marker from ``GET /props``): its ``/v1/completions`` only accepts a plain
+string prompt once a vision projector is loaded. vLLM's completions endpoint does
+not accept images, so for vLLM (or any non-llama.cpp server) image requests go to
+``/v1/chat/completions`` with ``chat_template_kwargs`` and ``developer`` messages,
+which vLLM renders with the model's own template.
 
 Confidence scores
 -----------------
@@ -689,6 +691,23 @@ def _raise_for_status(response: httpx.Response, settings: NuExtractSettings) -> 
                          kind="server", status_code=status, detail=message)
 
 
+def _native_to_oai(payload: Any) -> Any:
+    """llama.cpp native /completions response -> OpenAI completions shape."""
+    if not isinstance(payload, dict) or "content" not in payload or "choices" in payload:
+        return payload
+    probs = payload.get("completion_probabilities")
+    return {
+        "choices": [{
+            "text": payload.get("content") or "",
+            "finish_reason": "length" if payload.get("stop_type") == "limit" else "stop",
+            "logprobs": {"content": probs} if isinstance(probs, list) else None,
+        }],
+        "usage": {"prompt_tokens": payload.get("tokens_evaluated") or 0,
+                  "completion_tokens": payload.get("tokens_predicted") or 0},
+        "timings": payload.get("timings") or {},
+    }
+
+
 def _post_json(client: httpx.Client, url: str, body: dict, settings: NuExtractSettings) -> dict:
     try:
         response = client.post(url, json=body)
@@ -710,6 +729,7 @@ def _post_json(client: httpx.Client, url: str, body: dict, settings: NuExtractSe
     except ValueError as exc:
         raise NuExtractError("The NuExtract server returned a response that is not JSON.",
                              kind="protocol", detail=response.text[:500]) from exc
+    payload = _native_to_oai(payload)
     if not isinstance(payload, dict) or not payload.get("choices"):
         raise NuExtractError("The NuExtract server returned no completion choices.", kind="protocol",
                              detail=json.dumps(payload)[:500] if payload is not None else None)
@@ -835,13 +855,16 @@ def extract(settings: NuExtractSettings, *, text: str | None = None, images: lis
             prompt_text = render_prompt(template, text=text, n_images=len(images), instructions=instructions,
                                         examples=examples, enable_thinking=enable_thinking,
                                         image_token=marker or VISION_PLACEHOLDER)
-            prompt: Any = prompt_text
             if images:
-                prompt = {"prompt_string": prompt_text,
-                          "multimodal_data": [base64.b64encode(img).decode("ascii") for img in images]}
-            body = {"model": settings.model, "prompt": prompt, "max_tokens": max_tokens,
-                    "temperature": temperature, "logprobs": 1, "stream": False}
-            payload = _post_json(client, "completions", body, settings)
+                # llama.cpp native endpoint: the only one taking a prompt string plus images.
+                body = {"prompt": {"prompt_string": prompt_text,
+                                   "multimodal_data": [base64.b64encode(img).decode("ascii") for img in images]},
+                        "n_predict": max_tokens, "temperature": temperature, "n_probs": 1, "stream": False}
+                payload = _post_json(client, _server_root(settings) + "/completions", body, settings)
+            else:
+                body = {"model": settings.model, "prompt": prompt_text, "max_tokens": max_tokens,
+                        "temperature": temperature, "logprobs": 1, "stream": False}
+                payload = _post_json(client, "completions", body, settings)
     elapsed = time.monotonic() - started
     return _build_output(payload, use_chat=use_chat, enable_thinking=enable_thinking, max_tokens=max_tokens,
                          strict=strict, elapsed=elapsed)

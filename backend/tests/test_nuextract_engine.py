@@ -315,17 +315,33 @@ def test_extract_chat_path_uses_reasoning_content(fake):
     assert body["logprobs"] is True
 
 
-def test_extract_images_on_llama_cpp_use_media_marker_and_multimodal_data(fake):
+def test_extract_images_on_llama_cpp_use_native_endpoint_media_marker_and_multimodal_data(fake):
+    native = {"content": '{"n": 1}', "stop_type": "eos", "tokens_evaluated": 900, "tokens_predicted": 6,
+              "timings": {"prompt_per_second": 20.0},
+              "completion_probabilities": _llama_logprobs([('{"', 1.0), ("n", 1.0), ('":', 1.0), (" ", 1.0),
+                                                           ("1", 0.64), ("}", 1.0)])["content"]}
     server = fake({
         ("GET", "/props"): httpx.Response(200, json={"default_generation_settings": {},
                                                      "modalities": {"vision": True}, "media_marker": "<__m__>"}),
-        ("POST", "/v1/completions"): completion('{"n": 1}'),
+        ("POST", "/completions"): httpx.Response(200, json=native),
     })
-    out = ne.extract(SETTINGS, images=[b"\x89PNG fake"], template={"n": "integer"})
-    assert out.data == {"n": 1} and out.confidences == {}
-    prompt = server.requests[-1][2]["prompt"]
-    assert prompt["multimodal_data"] == ["iVBORyBmYWtl"]
-    assert "【document_start】\n<__m__>\n【document_end】" in prompt["prompt_string"]
+    out = ne.extract(SETTINGS, images=[b"\x89PNG fake"], template={"n": "integer"}, max_tokens=100)
+    assert out.data == {"n": 1} and out.finish_reason == "stop" and out.transport == "completions"
+    assert out.confidences == {("n",): pytest.approx(0.64)}
+    assert out.usage == {"prompt_tokens": 900, "completion_tokens": 6}
+    method, path, body = server.requests[-1]
+    assert path == "/completions" and body["n_predict"] == 100 and body["n_probs"] == 1
+    assert body["prompt"]["multimodal_data"] == ["iVBORyBmYWtl"]
+    assert "【document_start】\n<__m__>\n【document_end】" in body["prompt"]["prompt_string"]
+
+
+def test_native_limit_stop_maps_to_truncation(fake):
+    fake({("GET", "/props"): httpx.Response(200, json={"default_generation_settings": {},
+                                                       "modalities": {"vision": True}}),
+          ("POST", "/completions"): httpx.Response(200, json={"content": '{"n": ', "stop_type": "limit"})})
+    with pytest.raises(ne.NuExtractError) as info:
+        ne.extract(SETTINGS, images=[b"x"], template={"n": "integer"})
+    assert info.value.kind == "truncated"
 
 
 def test_extract_images_without_llama_cpp_fall_back_to_chat(fake):
