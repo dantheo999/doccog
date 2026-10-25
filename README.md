@@ -238,6 +238,20 @@ descriptions become its `instructions`. **What gets sent** shows both.
   minutes document; a page image takes about 4 minutes. llama.cpp slows sharply if other
   heavy work shares the cores, so give it dedicated threads (`NUEXTRACT_THREADS`).
   Running all 20 minutes documents is an over-lunch job on CPU and minutes on a GPU.
+- **Tuning on a desktop CPU (e.g. Core i9-13900K).** Start with `NUEXTRACT_THREADS=8` (one per
+  performance core) and compare 16; generation speed is bound mainly by memory bandwidth, so
+  more threads stop helping early. With Docker Desktop on Windows, the WSL2 VM caps CPUs and
+  memory: allow enough in `%UserProfile%\.wslconfig`, for example
+
+  ```ini
+  [wsl2]
+  processors=16
+  memory=24GB
+  ```
+
+  then `wsl --shutdown` and restart Docker Desktop. NuExtract's container needs about 7 GB
+  (`NUEXTRACT_MEM_LIMIT`). If the machine has an NVIDIA GPU, `compose.gpu.yaml` (vLLM) is far
+  faster than any CPU.
 
 ### Direct LLM
 
