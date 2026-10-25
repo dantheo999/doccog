@@ -235,8 +235,15 @@ def complete_source_recipe(system: str, payload: dict, settings: Settings, opera
         )
 
 
+SCHEMA_CLASSES_RULE = (
+    " extraction_classes is the agreed schema mapping: use ONLY those extraction_class names "
+    "and attribute keys, follow each class's extraction_text rule, put normalised values only "
+    "in the listed attributes, and annotate every class the sources support."
+)
+
+
 def generate_recipe(document: ParsedDocument | list[ParsedDocument], goal: str, settings: Settings,
-                    client: OpenAI | None = None) -> Recipe:
+                    client: OpenAI | None = None, class_guide: str = "") -> Recipe:
     documents = [document] if isinstance(document, ParsedDocument) else document
     if not 1 <= len(documents) <= 5:
         raise CognitionError("Choose between one and five exemplar documents.", 422)
@@ -253,12 +260,14 @@ def generate_recipe(document: ParsedDocument | list[ParsedDocument], goal: str, 
         })
     schema = response_schema(SelectedRecipe, catalog)
     schema["properties"]["examples"].update(minItems=len(documents), maxItems=len(documents))
+    payload = {"extraction_goal": goal, "source_documents": sources, "response_schema": schema}
+    if class_guide:
+        payload["extraction_classes"] = class_guide
     generated, examples = complete_source_recipe(
         PASSAGE_SELECTION_PROMPT + " Include exactly ONE relevant labelled example "
         "from EVERY source_documents entry, in source_documents order. If this is impossible, return an empty "
-        "examples array rather than inventing content.",
-        {"extraction_goal": goal, "source_documents": sources,
-         "response_schema": schema}, settings, "generation", catalog, SelectedRecipe, client,
+        "examples array rather than inventing content." + (SCHEMA_CLASSES_RULE if class_guide else ""),
+        payload, settings, "generation", catalog, SelectedRecipe, client,
         required_sources=list(catalog),
     )
     return Recipe(
@@ -271,7 +280,7 @@ def generate_recipe(document: ParsedDocument | list[ParsedDocument], goal: str, 
 
 
 def optimize_recipe(document: ParsedDocument, recipe: Recipe, result: ExtractionResult,
-                    settings: Settings, client: OpenAI | None = None) -> OptimizationProposal:
+                    settings: Settings, client: OpenAI | None = None, class_guide: str = "") -> OptimizationProposal:
     if result.document_id != document.id or result.text != document.text:
         raise CognitionError("Findings do not match the selected document. Run Extract again.", 409)
     if result.recipe_id != recipe.id or result.recipe_version != recipe.version:
@@ -299,6 +308,8 @@ def optimize_recipe(document: ParsedDocument, recipe: Recipe, result: Extraction
         "existing_source_passages": references,
         "response_schema": schema,
     }
+    if class_guide:
+        payload["extraction_classes"] = class_guide
     proposed, examples = complete_source_recipe(
         PASSAGE_SELECTION_PROMPT + " Analyze suspected missed cases, unsupported or "
         "duplicate findings, unclear class/attribute guidance and insufficient examples. "
@@ -314,7 +325,7 @@ def optimize_recipe(document: ParsedDocument, recipe: Recipe, result: Extraction
         "selected as a source; the server retains those examples unchanged. If "
         "existing_source_passages is empty, return examples: [] and improve only "
         "instructions and reasons. "
-        "Return only instructions, examples and reasons.",
+        "Return only instructions, examples and reasons." + (SCHEMA_CLASSES_RULE if class_guide else ""),
         payload, settings, "optimization", catalog, SelectedOptimization, client,
         required_sources=list(catalog),
     )
@@ -342,9 +353,12 @@ TARGET_EXTRACTION_SCOPE = (
 
 
 def extract_document(document: ParsedDocument, recipe: Recipe, settings: Settings,
-                     options: ExtractionOptions | None = None) -> ExtractionResult:
+                     options: ExtractionOptions | None = None, class_guide: str = "",
+                     reasoning_effort: str | None = None) -> ExtractionResult:
     options = options if options is not None else ExtractionOptions()
     config = build_model_config(settings, options.max_workers)
+    model_kwargs = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
+    schema_scope = f"\n\n{class_guide}" if class_guide else ""
     examples = [
         lx.data.ExampleData(text=example.text, extractions=[
             lx.data.Extraction(
@@ -356,10 +370,10 @@ def extract_document(document: ParsedDocument, recipe: Recipe, settings: Setting
     started = time.monotonic()
     model = None
     try:
-        model = RetryingOpenAIModel(model_id=settings.deployment, **config.provider_kwargs)
+        model = RetryingOpenAIModel(model_id=settings.deployment, **config.provider_kwargs, **model_kwargs)
         annotated = lx.extract(
             text_or_documents=document.text,
-            prompt_description=f"{recipe.instructions}\n\n{TARGET_EXTRACTION_SCOPE}\n\n{OUTPUT_FORMAT}",
+            prompt_description=f"{recipe.instructions}{schema_scope}\n\n{TARGET_EXTRACTION_SCOPE}\n\n{OUTPUT_FORMAT}",
             examples=examples, model=model,
             use_schema_constraints=False,
             max_char_buffer=options.chunk_size, max_workers=options.max_workers,
@@ -412,5 +426,5 @@ def extract_document(document: ParsedDocument, recipe: Recipe, settings: Setting
         document_id=document.id, text=document.text,
         recipe_id=recipe.id, recipe_version=recipe.version, extractions=items,
         elapsed_seconds=round(time.monotonic() - started, 2),
-        options=options,
+        options=options, usage=dict(model.usage),
     )

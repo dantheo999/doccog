@@ -8,12 +8,14 @@ export interface Segment {
   ids: string[];
 }
 
-export function buildSegments(text: string, spans: Span[]): Segment[] {
+/** Segments of text with the span ids covering each; extra cuts (e.g. page starts) also start a segment. */
+export function buildSegments(text: string, spans: Span[], cuts: number[] = []): Segment[] {
   const points = Array.from(text);
   const valid = spans.filter((span): span is Span & { start: number; end: number } =>
     span.start !== null && span.end !== null && Number.isInteger(span.start) && Number.isInteger(span.end)
     && span.start >= 0 && span.end > span.start && span.end <= points.length);
-  const boundaries = [...new Set([0, points.length, ...valid.flatMap(span => [span.start, span.end])])]
+  const extra = cuts.filter(cut => Number.isInteger(cut) && cut > 0 && cut < points.length);
+  const boundaries = [...new Set([0, points.length, ...extra, ...valid.flatMap(span => [span.start, span.end])])]
     .sort((a, b) => a - b);
   return boundaries.slice(0, -1).map((start, index) => {
     const end = boundaries[index + 1];
