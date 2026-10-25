@@ -1,0 +1,15 @@
+VENDOR PRIVACY AND RETENTION POLICY
+
+Northstar Analytics Ltd collects customer contact information to provide support.
+The Privacy Officer, Maya Chen, owns the customer access request process.
+Access requests must be acknowledged within five business days and fulfilled
+within 30 days under the GDPR.
+
+Support tickets containing personal information are retained for 24 months
+after closure. The Support Operations team is responsible for scheduled deletion.
+
+Northstar Analytics Ltd uses Harbor Cloud Services as its hosting processor.
+Harbor Cloud Services must notify the Privacy Officer of a suspected personal
+data breach within 24 hours. Sub-processors require prior written approval.
+
+This policy was approved on 15 September 2026.
