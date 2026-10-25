@@ -2,9 +2,11 @@
 
 Every schema leaf is requested as {"quote", "value", "confidence"}: the model copies the evidence
 first, then gives the (typed) value, then rates its own confidence. Quotes are checked against the
-source text before the record is returned; the shared grounder (results.finalise) turns them into
-highlights. Long documents are split on paragraph boundaries and chunk records are merged with
-results.merge_annotated().
+source text before the record is returned (layout-only differences are repaired to the source
+text; values with no locatable evidence have their confidence halved); the shared grounder
+(results.finalise) turns them into highlights. Long documents are split on paragraph boundaries
+with a small overlap; list items that straddle a boundary are joined (stitch) and the chunk records
+are then merged with results.merge_annotated().
 """
 from __future__ import annotations
 
@@ -44,10 +46,10 @@ only partly fits a field (for example an organisation where a person is asked fo
 it, but treat that as a judgement call when rating confidence.
 3. Field types:
    - verbatim: copy only the text that is the value itself, exactly as it appears (same words, \
-spelling, capitalisation and punctuation). Leave out neighbouring labels, prefixes, numbering, \
-bullets and annotations that are not part of the value (for a person's name: leave out a role, \
-abbreviation or note that follows it in brackets or after a comma, but keep titles and honours \
-written as part of the name).
+spelling, capitalisation and punctuation). Leave out neighbouring labels, field prefixes, \
+numbering and bullets, but keep everything that belongs to the value (for example dates, numbers \
+or a bracketed part of a title). For a person's name, keep titles and honours written with it but \
+leave out a role, initials or note added after it (e.g. in brackets).
    - text: concise, faithful wording. You may lightly normalise or summarise, but add nothing \
 the document does not say.
    - date: ISO 8601 YYYY-MM-DD. Take a missing year only from an explicit date elsewhere in the \
@@ -563,13 +565,15 @@ class LLMSolution(Solution):
     def settings_spec(self) -> list[SettingSpec]:
         return [
             SettingSpec("reasoning_effort", "Reasoning effort", "select", "medium",
-                        "How much the model thinks before answering. On the test corpus 'medium' found "
-                        "the most list items per second spent; 'none' is ~40% faster but misses more "
-                        "items, 'high' is ~2x slower for a small further recall gain.",
+                        "How much the model thinks before answering. On the meeting-minutes corpus "
+                        "'medium' gave the best completeness for its time (~25-35 s per 10-20k-character "
+                        "document); 'none' is ~40% faster but misses more list items; 'high' is ~1.6x "
+                        "slower than 'medium' without a consistent further gain.",
                         options=list(REASONING_EFFORTS)),
             SettingSpec("max_chunk_chars", "Maximum characters per call", "integer", 60_000,
-                        "Longer documents are split on paragraph boundaries (with a small overlap) and "
-                        "the parts merged. Every test document fits in one call.",
+                        "Longer documents are split on paragraph boundaries (with a small overlap), "
+                        "items spanning a boundary are joined and the parts merged. 60,000 characters is "
+                        "roughly 15,000 input tokens.",
                         min=2_000, max=200_000),
             SettingSpec("self_check", "Self-check pass", "boolean", False,
                         "Send the draft back to the model to review against the document and correct. "

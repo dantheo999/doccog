@@ -116,7 +116,8 @@ def _leaf_stats(values: list[FieldValue], name: str) -> dict:
 def aligned_rows(field: SchemaField, items: dict[str, list], pivot: str) -> list[dict]:
     """Rows of matched object/list items across runs, pivot run's order first."""
     single = field.model_copy(update={"array": False})
-    rows = [{"cells": {pivot: item}} for item in items.get(pivot, [])]
+    rows = [{"cells": {pivot: item}, "indexes": {pivot: index}, "scores": {}}
+            for index, item in enumerate(items.get(pivot, []))]
     for run_id, run_items in items.items():
         if run_id == pivot:
             continue
@@ -124,11 +125,12 @@ def aligned_rows(field: SchemaField, items: dict[str, list], pivot: str) -> list
         matched = set()
         for i, j, score in matches:
             rows[i]["cells"][run_id] = run_items[j]
-            rows[i].setdefault("scores", {})[run_id] = score
+            rows[i]["indexes"][run_id] = j
+            rows[i]["scores"][run_id] = score
             matched.add(j)
         for j, item in enumerate(run_items):
             if j not in matched:
-                rows.append({"cells": {run_id: item}, "scores": {}})
+                rows.append({"cells": {run_id: item}, "indexes": {run_id: j}, "scores": {}})
     return rows
 
 
@@ -175,6 +177,7 @@ def compare_runs(runs: list[Run], reference_id: str | None = None) -> dict:
                 pivot = reference.id if reference and reference.id in present else max(
                     present, key=lambda key: len(present[key] or []), default=None)
                 if pivot is not None:
+                    entry["pivot"] = pivot
                     entry["rows"] = aligned_rows(field, {key: list(value or []) for key, value in present.items()}, pivot)
             cells.append(entry)
 

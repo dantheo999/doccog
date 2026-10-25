@@ -169,13 +169,14 @@ export interface CompareCellValue {
   end: number | null;
 }
 
-export interface CompareRow { cells: Record<string, unknown>; scores?: Record<string, number> }
+export interface CompareRow { cells: Record<string, unknown>; indexes?: Record<string, number>; scores?: Record<string, number> }
 
 export interface CompareCell {
   document_id: string;
   field: string;
   values: Record<string, CompareCellValue>;
   agreement: Record<string, number | null>;
+  pivot?: string;
   rows?: CompareRow[];
 }
 

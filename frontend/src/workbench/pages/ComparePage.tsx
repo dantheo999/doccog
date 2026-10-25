@@ -73,8 +73,10 @@ function describe(item: unknown, field: SchemaField): string {
   return field.fields.map(child => `${child.name}: ${isEmpty(record[child.name]) ? "—" : formatValue(record[child.name])}`).join("\n");
 }
 
-/** Same pivot rule as backend/app/compare.py: the reference if present, else the run with the most items. */
+/** The run other runs' items are aligned to. The server reports it; older responses fall back to its rule:
+ * the reference if present, else the run with the most items. */
 function pivotOf(cell: CompareCell, runs: CompareRunStats[], reference: string | null): string | null {
+  if (cell.pivot) return cell.pivot;
   if (reference && cell.values[reference]) return reference;
   let best: string | null = null;
   let most = -1;
@@ -753,6 +755,7 @@ function Drilldown({ comparison, cells, documentId, active, onClose, onSource }:
 }
 
 function itemIndex(cell: CompareCell, runId: string, row: CompareRow): number | undefined {
+  if (row.indexes && runId in row.indexes) return row.indexes[runId];
   const items = cell.values[runId]?.value;
   if (!Array.isArray(items) || row.cells[runId] === undefined) return undefined;
   const wanted = JSON.stringify(row.cells[runId]);
