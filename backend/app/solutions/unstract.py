@@ -17,7 +17,7 @@ import mimetypes
 import os
 import threading
 import time
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -365,19 +365,23 @@ class UnstractSolution(Solution):
 
     def _poll(self, client: httpx.Client, status_url: str, headers: dict, settings: dict,
               context: RunContext) -> tuple[dict, list]:
-        params = {"include_metadata": "true" if settings.get("include_metadata") else "false",
+        # httpx replaces a URL's query string when params= is given, so carry execution_id over explicitly.
+        parts = urlsplit(status_url)
+        base = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+        params = {**dict(parse_qsl(parts.query)),
+                  "include_metadata": "true" if settings.get("include_metadata") else "false",
                   "include_metrics": "true" if settings.get("include_metrics", True) else "false"}
         deadline = time.monotonic() + float(settings.get("max_wait", 1800))
         interval = float(settings.get("poll_interval", 3))
         failures = 0
-        execution = status_url.split("execution_id=")[-1]
+        execution = params.get("execution_id", "")
         while True:
             self._sleep(interval, context, deadline)
             if time.monotonic() >= deadline:
                 raise ServiceError(f"Unstract did not finish within {settings.get('max_wait', 1800)} s "
                                    f"(execution {execution}). It may still complete in Unstract.", 504)
             try:
-                response = client.get(status_url, headers=headers, params=params)
+                response = client.get(base, headers=headers, params=params)
             except httpx.HTTPError as error:
                 failures += 1
                 if failures >= 5:
