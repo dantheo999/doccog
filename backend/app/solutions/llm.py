@@ -18,7 +18,7 @@ import re
 
 from pydantic import JsonValue
 
-from app.azure import REASONING_EFFORTS, ServiceError, chat_json, make_client
+from app.azure import REASONING_EFFORTS, OutputLimitError, ServiceError, chat_json, make_client
 from app.documents import ParsedDocument
 from app.grounding import TRANSLATE, Grounder
 from app.results import Leaf, Usage, merge_annotated, plain
@@ -342,12 +342,13 @@ def check_quotes(record: dict, fields: list[SchemaField], grounder: Grounder) ->
         if leaf.quote:
             check.quoted += 1
             found = grounder.find(leaf.quote)
+            source = text[found.start:found.end] if found else ""
             if found is None:
                 check.missing += 1
-            elif found.kind == "exact":
+            elif source == leaf.quote.strip():
                 check.exact += 1
-            elif same_modulo_layout(text[found.start:found.end], leaf.quote):
-                leaf.quote = text[found.start:found.end]
+            elif same_modulo_layout(source, leaf.quote):
+                leaf.quote = source
                 check.repaired += 1
             else:
                 check.fuzzy += 1
@@ -668,8 +669,9 @@ class _Job:
                                   part_note=note)
         try:
             data, usage, seconds = self.call(messages, "extraction")
-        except ServiceError as error:
-            if "output tokens" not in str(error) or len(chunk.text) < MIN_SPLIT_CHARS:
+        except OutputLimitError as error:
+            self.usage = self.usage.add(error.usage)  # the overflowing call still cost tokens
+            if len(chunk.text) < MIN_SPLIT_CHARS:
                 raise
             halves = split_text(chunk.text, math.ceil(len(chunk.text) / 2) + default_overlap(len(chunk.text)))
             self.notes.append(f"Characters {chunk.start:,}-{chunk.end:,} exceeded the model's output limit "

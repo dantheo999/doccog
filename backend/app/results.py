@@ -164,13 +164,16 @@ def merge_annotated(fields: list[SchemaField], records: list[dict]) -> dict:
     """Merge chunk-level records: best-confidence scalars, concatenated de-duplicated arrays."""
     def merge(field, values):
         if field.array:
-            merged, seen = [], set()
+            # Drop items repeated from an earlier chunk (overlap); repeats within one chunk are real.
+            merged, earlier = [], set()
             for items in values:
+                current = set()
                 for item in items or []:
                     key = _fingerprint(item)
-                    if key not in seen and not is_empty(plain(item)):
-                        seen.add(key)
+                    if key not in earlier and not is_empty(plain(item)):
+                        current.add(key)
                         merged.append(item)
+                earlier |= current
             return merged
         if field.type == "object":
             return {child.name: merge(child, [(value or {}).get(child.name) for value in values])
@@ -216,18 +219,29 @@ class ValueBuilder:
             return self._leaf(field, value, path, display, near, window, values)
         source = value if isinstance(value, dict) else {}
         scalars = [child for child in field.fields if child.type != "object" and not child.array]
-        # Pass 1: children carrying explicit evidence locate the item in the document.
+        # Pass 1: children carrying explicit evidence locate the item. The most distinctive one goes
+        # first (a span, then a quote occurring once), and the rest are searched near it, so a
+        # name that also appears elsewhere is highlighted where this item is.
         evidence = [child for child in scalars if isinstance(source.get(child.name), Leaf)
                     and (source[child.name].quote or source[child.name].start is not None)]
         if not evidence:
             evidence = [child for child in scalars if child.type in ("verbatim", "text")][:1]
+
+        def distinctiveness(child):
+            leaf = source.get(child.name)
+            if isinstance(leaf, Leaf) and leaf.start is not None:
+                return 0
+            needle = leaf.quote if isinstance(leaf, Leaf) and leaf.quote else plain(leaf)
+            return 1 if isinstance(needle, str) and self.grounder.count(needle) == 1 else 2
+
         anchor = None
-        for child in evidence:
+        local = window
+        for child in sorted(evidence, key=distinctiveness):
             start = self._leaf(child, source.get(child.name), path + [child.name], f"{display}.{child.name}",
-                               near, window, values)
-            if start is not None:
-                anchor = start if anchor is None else min(anchor, start)
-        local = sentence_window(self.text, anchor, anchor) if anchor is not None else window
+                               anchor if anchor is not None else near, local, values)
+            if start is not None and anchor is None:
+                anchor = start
+                local = sentence_window(self.text, anchor, anchor)
         for child in field.fields:
             if child in evidence:
                 continue

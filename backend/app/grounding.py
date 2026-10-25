@@ -122,13 +122,25 @@ class Grounder:
                 return Match(chosen[0], chosen[1], "exact", 100.0)
             chosen = self._choose(inside(loose), near)
             if chosen:
-                kind = "exact" if self.text[chosen[0]:chosen[1]] == stripped else "fuzzy"
-                return Match(chosen[0], chosen[1], kind, 99.0)
+                # Layout-only differences (PDF line breaks, repeated spaces) still count as exact.
+                same = " ".join(self.text[chosen[0]:chosen[1]].split()) == " ".join(stripped.split())
+                return Match(chosen[0], chosen[1], "exact" if same else "fuzzy", 99.0)
             if fuzzy and len(target) >= 6:
                 match = self._fuzzy(target[:1_000], self._norm_bounds(scope), min_score)
                 if match:
                     return match
         return None
+
+    def count(self, needle: str, limit: int = 2) -> int:
+        """Occurrences of needle (exact or normalised), counting at most up to limit."""
+        stripped = needle.strip() if isinstance(needle, str) else ""
+        if not stripped:
+            return 0
+        exact = len(self._occurrences(self.text, stripped)[:limit])
+        if exact:
+            return exact
+        target = _normalised_needle(stripped)
+        return len(self._occurrences(self._norm, target)[:limit]) if target else 0
 
     def find_value(self, value: JsonValue, field: SchemaField, near: int | None = None,
                    window: tuple[int, int] | None = None) -> Match | None:

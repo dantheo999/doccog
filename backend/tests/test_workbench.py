@@ -253,3 +253,29 @@ def test_api_run_lifecycle_and_compare(monkeypatch):
     assert client.post("/api/runs", json={"solution": "fake", "schema_id": saved["id"], "document_ids": [uploaded["id"]],
                                           "settings": {"unknown": 1}}).status_code == 422
     assert client.delete(f"/api/runs/{run_id}").status_code == 200
+
+
+def test_merge_keeps_repeats_within_a_chunk_but_drops_overlap_repeats():
+    fields = draft().fields
+    first = annotate_plain({"attendees": [{"name": "FSRU"}, {"name": "FSRU"}, {"name": "A"}]}, fields)
+    second = annotate_plain({"attendees": [{"name": "A"}, {"name": "B"}]}, fields)
+    merged = merge_annotated(fields, [first, second])
+    assert [item["name"].value for item in merged["attendees"]] == ["FSRU", "FSRU", "A", "B"]
+
+
+def test_layout_only_differences_ground_as_exact():
+    grounder = Grounder("The Board agreed the minutes\nof the meeting.")
+    assert grounder.find("The Board agreed the minutes of the meeting.").kind == "exact"
+    assert grounder.find("the board agreed the minutes of the meeting.").kind == "fuzzy"
+
+
+def test_item_children_are_anchored_by_their_most_distinctive_quote():
+    text = ("1.1 Jane Smith welcomed members.\n" + "Filler. " * 400
+            + "\nAnnex A\nJane Smith, Chair of the Finance Committee\n")
+    fields = [SchemaField.model_validate({"name": "attendees", "type": "object", "array": True, "fields": [
+        {"name": "name", "type": "verbatim"}, {"name": "role", "type": "verbatim"}]})]
+    record = {"attendees": [{"name": Leaf("Jane Smith", quote="Jane Smith"),
+                             "role": Leaf("Chair of the Finance Committee", quote="Chair of the Finance Committee")}]}
+    _, values = ValueBuilder(text).build(fields, record)
+    name = next(value for value in values if value.field == "attendees[].name")
+    assert name.start == text.rindex("Jane Smith")

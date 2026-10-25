@@ -10,13 +10,18 @@ from app.settings import Settings
 
 
 logger = logging.getLogger(__name__)
-REASONING_EFFORTS = ("none", "low", "medium", "high")
+REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh")
 
 
 class ServiceError(ValueError):
-    def __init__(self, message: str, status: int = 502):
+    def __init__(self, message: str, status: int = 502, usage: Usage | None = None):
         super().__init__(message)
         self.status = status
+        self.usage = usage or Usage()  # tokens spent by a call that still failed
+
+
+class OutputLimitError(ServiceError):
+    """The model stopped at its output-token limit; callers can retry with smaller input."""
 
 
 def require_azure(settings: Settings):
@@ -68,16 +73,16 @@ def chat_json(settings: Settings, messages: list[dict], *, response_format: dict
                   completion_tokens=getattr(response.usage, "completion_tokens", 0) or 0)
     elapsed = time.monotonic() - started
     if not response.choices:
-        raise ServiceError(f"Azure returned no choices for {operation}.")
+        raise ServiceError(f"Azure returned no choices for {operation}.", usage=usage)
     choice = response.choices[0]
     if getattr(choice.message, "refusal", None):
-        raise ServiceError(f"The model declined the {operation} request.")
+        raise ServiceError(f"The model declined the {operation} request.", usage=usage)
     if choice.finish_reason == "length":
-        raise ServiceError(f"The model ran out of output tokens during {operation}. "
-                           "Use smaller chunks or a narrower schema.", 502)
+        raise OutputLimitError(f"The model ran out of output tokens during {operation}. "
+                               "Use smaller chunks or a narrower schema.", 502, usage=usage)
     if not choice.message.content:
-        raise ServiceError(f"Azure returned an empty {operation} response.")
+        raise ServiceError(f"Azure returned an empty {operation} response.", usage=usage)
     try:
         return json.loads(choice.message.content), usage, elapsed
     except json.JSONDecodeError as error:
-        raise ServiceError(f"The model returned invalid JSON for {operation}.") from error
+        raise ServiceError(f"The model returned invalid JSON for {operation}.", usage=usage) from error

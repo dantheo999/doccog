@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from app.azure import ServiceError
+from app.azure import OutputLimitError, ServiceError
 from app.documents import DocumentStore, ParsedDocument
 from app.grounding import Grounder
 from app.results import Leaf, Usage, finalise, plain
@@ -383,7 +383,7 @@ def to_json_nulls():
 
 def test_extract_splits_chunk_that_overflows_output(fake):
     text = "\n\n".join(f"Paragraph {index}: " + "content " * 30 for index in range(30))
-    overflow = ServiceError("The model ran out of output tokens during extraction. Use smaller chunks.", 502)
+    overflow = OutputLimitError("The model ran out of output tokens during extraction. Use smaller chunks.", 502)
     fake["responses"] = [overflow] + [lambda messages: to_json_nulls()] * 4
     outcome = LLMSolution(AZURE).extract(ParsedDocument(name="o.txt", text=text), make_schema(), {}, context())
     assert len(fake["calls"]) >= 3
@@ -399,7 +399,7 @@ def test_extract_propagates_service_errors(fake):
 
 
 def test_extract_overflow_on_small_chunk_is_not_retried(fake):
-    fake["responses"] = [ServiceError("The model ran out of output tokens during extraction.", 502)]
+    fake["responses"] = [OutputLimitError("The model ran out of output tokens during extraction.", 502)]
     with pytest.raises(ServiceError):
         LLMSolution(AZURE).extract(ParsedDocument(name="m.txt", text=MINUTES), make_schema(), {}, context())
     assert len(fake["calls"]) == 1
