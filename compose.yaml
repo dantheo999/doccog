@@ -12,6 +12,7 @@ services:
       UNSTRACT_UI_URL: ${UNSTRACT_UI_URL:-}
       UNSTRACT_API_URL: ${UNSTRACT_API_URL:-}
       UNSTRACT_API_KEY: ${UNSTRACT_API_KEY:-}
+      UNSTRACT_ALLOWED_ORIGINS: ${UNSTRACT_ALLOWED_ORIGINS:-}
     expose:
       - "8000"
     # Lets the backend reach an Unstract platform running on the Docker host.

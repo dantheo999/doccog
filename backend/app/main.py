@@ -6,7 +6,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 
 from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
-from pydantic import Field
+from pydantic import Field, JsonValue
 
 from app.azure import REASONING_EFFORTS, ServiceError
 from app.cognition import CognitionError, extract_document, generate_recipe, optimize_recipe
@@ -14,13 +14,14 @@ from app.compare import compare_runs
 from app.documents import DocumentError, DocumentStore, MAX_UPLOAD_BYTES, parse_document
 from app.jobs import JobRunner
 from app.models import ExtractRequest, GenerateRequest, OptimizationProposal, OptimizeRequest, Recipe, StrictModel
-from app.results import DocumentResult, Run, RunCreate, RunImport, annotate_plain, finalise
+from app.results import DocumentResult, ImportedRecord, Run, RunCreate, RunImport, annotate_plain, finalise
 from app.schema import SchemaDraft, meeting_minutes_schema
 from app.schema_suggest import suggest_schema
 from app.settings import data_dir, load_settings
 from app.solutions import build_registry
 from app.solutions.base import RunContext
 from app.solutions.langextract import class_guide
+from app.unstract_export import import_records
 from app.storage import CollectionCreate, CollectionDocument, CollectionStore, RunStore, SchemaStore, now
 
 
@@ -233,17 +234,17 @@ def create_run(request: RunCreate):
     return run.summary()
 
 
-@app.post("/api/runs/import")
-def import_run(request: RunImport):
-    """Collate externally produced results into a completed run, grounded like any other."""
-    solution = solutions.get(request.solution)
-    schema = schemas.get(request.schema_id, request.schema_version)
+def collate_run(solution_id: str, label: str, model: str, schema, records: list[ImportedRecord]) -> Run:
+    """A completed run from results produced outside the workbench, grounded like any other."""
+    solution = solutions.get(solution_id)
     results = []
-    for record in request.records:
+    for record in records:
         document = store.get(record.document_id)
         result = DocumentResult(document_id=document.id, document_name=document.name,
                                 document_sha256=document.sha256, raw=record.raw,
                                 started_at=now(), finished_at=now())
+        notes = record.raw.get("notes") if isinstance(record.raw, dict) else None
+        result.notes = [str(note) for note in notes] if isinstance(notes, list) else []
         if record.error or record.data is None:
             result.status, result.error = "error", record.error or "No result for this document."
         else:
@@ -254,17 +255,57 @@ def import_run(request: RunImport):
                 result.notes.append(f"{ungrounded} of {len(result.values)} values could not be located in the text.")
         results.append(result)
     run = Run(
-        id=uuid4().hex[:16], solution=request.solution,
-        solution_name=solution.name if solution else request.solution,
-        label=request.label.strip() or f"{solution.name if solution else request.solution} · imported",
-        model=request.model or "imported results",
+        id=uuid4().hex[:16], solution=solution_id,
+        solution_name=solution.name if solution else solution_id,
+        label=label.strip() or f"{solution.name if solution else solution_id} · imported",
+        model=model or "imported results",
         confidence_method=solution.confidence_method if solution else "Not provided.",
         status="done" if any(item.status == "done" for item in results) else "error",
         extraction_schema=schema, settings={"imported": True}, created_at=now(), started_at=now(),
         finished_at=now(), documents=results,
     )
     runs.save(run)
-    return run.summary()
+    return run
+
+
+@app.post("/api/runs/import")
+def import_run(request: RunImport):
+    schema = schemas.get(request.schema_id, request.schema_version)
+    return collate_run(request.solution, request.label, request.model, schema, request.records).summary()
+
+
+class ResultsFile(StrictModel):
+    name: str = Field(default="", max_length=1_024)
+    content: JsonValue
+
+
+class UnstractImport(StrictModel):
+    schema_id: str
+    schema_version: int | None = None
+    label: str = Field(default="", max_length=200)
+    document_ids: list[str] = Field(min_length=1, max_length=500)
+    files: list[ResultsFile] = Field(min_length=1, max_length=500)
+
+
+@app.post("/api/solutions/unstract/import")
+def import_unstract(request: UnstractImport):
+    """Collate result JSON downloaded from Unstract (API responses or per-file outputs) into a run."""
+    schema = schemas.get(request.schema_id, request.schema_version)
+    documents = [store.get(document_id) for document_id in dict.fromkeys(request.document_ids)]
+    records: dict[str, ImportedRecord] = {}
+    warnings: list[str] = []
+    for item in request.files:
+        found, file_warnings = import_records(item.content, documents, schema, item.name or None)
+        warnings += file_warnings
+        for record in found:
+            if record["document_id"] in records:
+                warnings.append(f"More than one result for document {record['document_id']}; kept the first.")
+                continue
+            records[record["document_id"]] = ImportedRecord.model_validate(record)
+    if not records:
+        raise HTTPException(422, " ".join(warnings) or "No results in the uploaded files matched the document set.")
+    run = collate_run("unstract", request.label, "Unstract · imported results", schema, list(records.values()))
+    return {**run.summary(), "warnings": list(dict.fromkeys(warnings))}
 
 
 @app.get("/api/runs")

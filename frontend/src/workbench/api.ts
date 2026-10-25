@@ -69,7 +69,7 @@ export const workbench = {
     records: { document_id: string; data: Record<string, unknown> | null; error?: string | null; raw?: unknown }[] }) =>
     request<RunSummary>("/runs/import", json("POST", body)),
   importUnstract: (body: { schema_id: string; label: string; document_ids: string[]; files: { name: string; content: unknown }[] }) =>
-    request<RunSummary>("/solutions/unstract/import", json("POST", body)),
+    request<RunSummary & { warnings: string[] }>("/solutions/unstract/import", json("POST", body)),
   cancelRun: (id: string) => request<{ cancelled: boolean }>(`/runs/${id}/cancel`, { method: "POST" }),
   deleteRun: (id: string) => request<{ deleted: string }>(`/runs/${id}`, { method: "DELETE" }),
   compare: (runIds: string[], referenceRunId: string | null) =>

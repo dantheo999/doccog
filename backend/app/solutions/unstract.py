@@ -314,9 +314,7 @@ class UnstractSolution(Solution):
         raw = {"execution_id": execution_id, "api_deployment": api_name(url),
                "request": {**form, "file": file_name}, "item": _trim_metadata(item),
                "status": final.get("status") if isinstance(final, dict) else None}
-        if not settings.get("include_metadata"):
-            notes.append("Unstract metadata not requested, so no confidence data is available.")
-        elif not confidences:
+        if settings.get("include_metadata") and not confidences:
             notes.append("Unstract returned no confidence data (community edition has none).")
         return Outcome(record=record, usage=usage, notes=list(dict.fromkeys(notes + mapping_notes)), raw=raw)
 

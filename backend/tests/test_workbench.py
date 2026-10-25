@@ -279,3 +279,28 @@ def test_item_children_are_anchored_by_their_most_distinctive_quote():
     _, values = ValueBuilder(text).build(fields, record)
     name = next(value for value in values if value.field == "attendees[].name")
     assert name.start == text.rindex("Jane Smith")
+
+
+def test_unstract_results_file_is_collated_into_a_grounded_run():
+    from app import main
+    client = TestClient(main.app)
+    uploaded = client.post("/api/documents", files={"file": ("u.txt", TEXT.encode(), "text/plain")}).json()
+    saved = client.post("/api/schemas", json={"draft": client.get("/api/schemas/starter").json()}).json()
+    payload = {"status": "COMPLETED", "message": [{"file": "u.txt", "status": "Success", "error": None,
+               "result": {"output": {"meeting_date": "2019-10-22", "chair": "NA",
+                                     "attendees": '[{"name": "Simon Dow", "role": "Interim Chair"}]'}},
+               "metadata": {"usage": {"prompt_tokens": 10, "completion_tokens": 2}}},
+               {"file": "unknown.pdf", "status": "Success", "result": {"output": {}}}]}
+    response = client.post("/api/solutions/unstract/import", json={
+        "schema_id": saved["id"], "document_ids": [uploaded["id"]], "files": [{"name": "results.json", "content": payload}]})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["documents_done"] == 1 and any("unknown.pdf" in warning for warning in body["warnings"])
+    run = client.get(f"/api/runs/{body['id']}").json()
+    data = run["documents"][0]["data"]
+    assert data["meeting_date"] == "2019-10-22" and data["chair"] is None
+    assert data["attendees"][0]["name"] == "Simon Dow"
+    assert all(value["grounding"] == "exact" for value in run["documents"][0]["values"])
+    empty = client.post("/api/solutions/unstract/import", json={
+        "schema_id": saved["id"], "document_ids": [uploaded["id"]], "files": [{"name": "x.json", "content": {"message": []}}]})
+    assert empty.status_code == 422
