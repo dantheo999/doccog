@@ -1,17 +1,19 @@
 """LangExtract adapter: schema -> extraction classes, grounded findings -> schema records."""
 from dataclasses import dataclass, field as dataclass_field
+import re
 
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
 
 from app.azure import REASONING_EFFORTS, ServiceError
-from app.cognition import CognitionError, extract_document
+from app.cognition import CognitionError, extract_document, generate_recipe
 from app.documents import ParsedDocument
 from app.grounding import normalise
 from app.models import ExtractionItem, ExtractionOptions, Recipe
 from app.results import Leaf, Usage
-from app.schema import ExtractionSchema, SchemaField, TYPE_LABELS, coerce_scalar
+from app.schema import ExtractionSchema, FieldType, SchemaField, TYPE_LABELS, coerce_scalar, parse_date
+from app.schema_suggest import build_draft, snake_name, unique_name
 from app.settings import load_settings
-from app.solutions.base import Outcome, RunContext, SettingSpec, Solution
+from app.solutions.base import Outcome, RunContext, SettingSpec, Solution, SuggestionOutcome
 
 
 SEPARATOR = "__"
@@ -225,6 +227,104 @@ def assemble(fields: list[SchemaField], items: list[ExtractionItem]) -> tuple[di
     return root, list(dict.fromkeys(notes))
 
 
+# --- Derived schema suggestion: recipe classes and attributes -> schema fields -------------
+
+DEFAULT_SUGGESTION_GOAL = (
+    "Extract the recurring, structured information in documents of this type: people and organisations with "
+    "their roles, dates, decisions, actions or obligations with owners and due dates, amounts and other key "
+    "facts. Record the details of each item as attributes.")
+NUMBER = re.compile(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
+BOOLEAN_WORDS = ("true", "false", "yes", "no")
+MAX_CHILDREN = 40
+
+
+def _field_name(name: str, seen: set[str]) -> str:
+    return unique_name(snake_name(re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(name))), seen)
+
+
+def _number(value: JsonValue) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and NUMBER.fullmatch(value.strip()):
+        return float(value.strip().replace(",", ""))
+    return None
+
+
+def infer_type(values: list[JsonValue]) -> tuple[FieldType, bool]:
+    """(type, array) for an attribute from the values seen in the recipe's annotations."""
+    present = [value for value in values if value is not None and value != "" and value != []]
+    if any(isinstance(value, list) for value in present):
+        return "text", True
+    if not present:
+        return "text", False
+    if all(isinstance(value, bool) or (isinstance(value, str) and value.strip().casefold() in BOOLEAN_WORDS)
+           for value in present):
+        return "boolean", False
+    numbers = [_number(value) for value in present]
+    if all(number is not None for number in numbers):
+        return ("integer" if all(number.is_integer() for number in numbers) else "number"), False
+    if all(isinstance(value, str) and parse_date(value) for value in present):
+        return "date", False
+    return "text", False
+
+
+def _examples(values: list[JsonValue]) -> str:
+    seen = list(dict.fromkeys(str(value)[:40] for value in values
+                              if value not in (None, "", []) and not isinstance(value, (dict, list))))[:3]
+    return f"; e.g. {', '.join(repr(value) for value in seen)}" if seen else ""
+
+
+def schema_from_recipe(recipe: Recipe) -> tuple[list[dict], list[str]]:
+    """Schema fields inferred from a recipe's extraction classes (in first-seen order).
+
+    A class with attributes becomes an object (child "text" = the annotated span, one child per attribute
+    key); a class without attributes a verbatim value. Either is a list when the class occurs more than
+    once in any example."""
+    classes: dict[str, dict] = {}
+    for example in recipe.examples:
+        per_example: dict[str, int] = {}
+        for extraction in example.extractions:
+            name = extraction.extraction_class
+            entry = classes.setdefault(name, {"count": 0, "most": 0, "attributes": {}})
+            entry["count"] += 1
+            per_example[name] = per_example.get(name, 0) + 1
+            for key, value in (extraction.attributes or {}).items():
+                entry["attributes"].setdefault(key, []).append(value)
+        for name, count in per_example.items():
+            classes[name]["most"] = max(classes[name]["most"], count)
+    fields, notes, seen = [], [], set()
+    for name, entry in classes.items():
+        plural = "s" if entry["count"] != 1 else ""
+        field = {"name": _field_name(name, seen), "array": entry["most"] > 1, "options": [], "fields": [],
+                 "description": f"From LangExtract class {name} ({entry['count']} annotation{plural})."}
+        if not entry["attributes"]:
+            fields.append({**field, "type": "verbatim"})
+            continue
+        children, child_names = [{"name": "text", "type": "verbatim", "array": False, "options": [], "fields": [],
+                                  "description": f"The exact text annotated as {name}."}], {"text"}
+        for key, values in entry["attributes"].items():
+            kind, array = infer_type(values)
+            count = sum(value not in (None, "", []) for value in values)
+            children.append({"name": _field_name(key, child_names), "type": kind, "array": array, "options": [],
+                             "fields": [], "description": f"From attribute '{key}' of {name} "
+                                                          f"({count} value{'s' if count != 1 else ''}{_examples(values)})."[:1_000]})
+        if len(children) > MAX_CHILDREN:
+            notes.append(f"Class {name} has {len(children) - 1} attributes; kept the first {MAX_CHILDREN - 1}.")
+        fields.append({**field, "type": "object", "fields": children[:MAX_CHILDREN]})
+    singles = [name for name, entry in classes.items() if entry["most"] == 1 and entry["count"] > 1]
+    if singles:
+        notes.append(f"{', '.join(singles)} occurred at most once per example, so became single values; make them "
+                     "lists if a document can contain several (recipe examples are short passages).")
+    if len(fields) > 60:
+        notes.append(f"The recipe has {len(fields)} classes; kept the first 60.")
+    annotations = sum(entry["count"] for entry in classes.values())
+    notes.append(f"The recipe has {len(recipe.examples)} example(s) with {annotations} annotations "
+                 f"in {len(classes)} class{'es' if len(classes) != 1 else ''}.")
+    return fields[:60], notes
+
+
 OPTION_SPECS = [
     SettingSpec("chunk_size", "Target chunk size (characters)", "integer", 6000, min=500, max=20000,
                 help="Smaller chunks mean more requests and repeated examples; larger chunks risk missed items."),
@@ -252,6 +352,11 @@ class LangExtractSolution(Solution):
     route = "/apps/langextract"
     accent = "#aa98ff"
     document_concurrency = 2
+    schema_suggestion_method = (
+        "Derived (LangExtract has no schema-suggestion feature): a LangExtract recipe is generated from the "
+        "exemplars without a schema, using the guidance as its goal, and a schema is inferred from the recipe's "
+        "extraction classes (objects or verbatim values) and their attributes (child fields typed from the "
+        "annotated values).")
 
     def settings_spec(self) -> list[SettingSpec]:
         return OPTION_SPECS + [
@@ -288,6 +393,24 @@ class LangExtractSolution(Solution):
 
     def preview(self, schema: ExtractionSchema, settings: dict) -> dict[str, str]:
         return {"Schema class guide (appended to the recipe instructions)": class_guide(schema)}
+
+    def suggest_schema(self, documents: list[ParsedDocument], guidance: str, settings: dict,
+                       context: RunContext) -> SuggestionOutcome:
+        goal = guidance.strip() or DEFAULT_SUGGESTION_GOAL
+        try:
+            recipe = generate_recipe(documents, goal, load_settings())
+        except CognitionError as error:
+            raise ServiceError(str(error), error.status) from error
+        fields, notes = schema_from_recipe(recipe)
+        draft = build_draft("LangExtract recipe schema",
+                            f"Derived from the classes of a LangExtract recipe generated for: {goal}", fields)
+        notes = ["LangExtract has no schema-suggestion feature: this schema is derived from the extraction classes "
+                 "and attributes of a recipe generated from the exemplars.",
+                 "LangExtract classes only nest one level (a class and its attributes), so deeper structure "
+                 "is not represented."] + notes + [
+                 "LangExtract recipe generation does not report token usage, so usage shows zero."]
+        return SuggestionOutcome(draft=draft, notes=notes, usage=Usage(),
+                                 raw={"goal": goal, "recipe": recipe.model_dump(mode="json")})
 
     def extract(self, document: ParsedDocument, schema: ExtractionSchema, settings: dict,
                 context: RunContext) -> Outcome:

@@ -145,6 +145,10 @@ class UnstractSolution(Solution):
     accent = "#ffb36b"
     document_concurrency = 2
     external_url = ui_url()
+    schema_suggestion_unsupported = (
+        "Unstract's open-source edition has no prompt or schema generation; its source references an Agentic "
+        "Studio project type that only exists in the cloud and on-prem editions (not verified here). Generate "
+        "the Prompt Studio project from the agreed schema instead.")
 
     def __init__(self):
         self._status_cache: tuple[float, tuple, dict] | None = None

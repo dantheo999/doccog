@@ -1,4 +1,8 @@
-"""Propose an extraction schema from exemplar documents with a single structured LLM call."""
+"""Propose an extraction schema from exemplar documents with a single structured LLM call.
+
+This is the shared, solution-neutral suggestion (POST /api/schemas/suggest). The Direct LLM solution
+reuses it with its own settings; the helpers below (names, draft validation, field-list merging) are
+shared with the other solutions' suggestion methods."""
 import re
 
 from pydantic import ValidationError
@@ -11,6 +15,8 @@ from app.settings import Settings
 
 
 MAX_EXEMPLAR_CHARACTERS = 400_000
+SHARED_METHOD = ("Solution-neutral: one Azure OpenAI call reads the exemplars' full text and returns a schema "
+                 "as strict JSON.")
 LEAF_TYPES = ["text", "verbatim", "date", "number", "integer", "boolean", "enum"]
 
 SUGGEST_PROMPT = """You design extraction schemas for families of similar documents.
@@ -60,11 +66,18 @@ def response_format() -> dict:
     }}}
 
 
-def _snake(name: str) -> str:
+def snake_name(name: str) -> str:
     name = re.sub(r"[^a-z0-9]+", "_", str(name).strip().casefold()).strip("_")
     if not name or not name[0].isalpha():
         name = f"field_{name}" if name else "field"
     return name[:64]
+
+
+def unique_name(name: str, seen: set[str]) -> str:
+    while name in seen:
+        name = f"{name}_2"[:64]
+    seen.add(name)
+    return name
 
 
 def sanitise_fields(fields: list, level: int = 1) -> list[dict]:
@@ -73,10 +86,7 @@ def sanitise_fields(fields: list, level: int = 1) -> list[dict]:
     for item in fields if isinstance(fields, list) else []:
         if not isinstance(item, dict):
             continue
-        name = _snake(item.get("name", ""))
-        while name in seen:
-            name = f"{name}_2"[:64]
-        seen.add(name)
+        name = unique_name(snake_name(item.get("name", "")), seen)
         kind: FieldType = item.get("type") if item.get("type") in LEAF_TYPES + ["object"] else "text"
         children = sanitise_fields(item.get("fields", []), level + 1) if level < 3 else []
         options = list(dict.fromkeys(str(option).strip() for option in item.get("options", [])
@@ -92,6 +102,51 @@ def sanitise_fields(fields: list, level: int = 1) -> list[dict]:
             "fields": children if kind == "object" else [],
         })
     return cleaned
+
+
+def _describe(field: dict) -> str:
+    return f"{'list of ' if field['array'] else ''}{field['type']}"
+
+
+def merge_field_lists(first: list[dict], other: list[dict], prefix: str = "") -> tuple[list[dict], list[str]]:
+    """Union of two sanitised field lists by name, recursively. The first type wins (conflicts are
+    reported); a field becomes a list if either side is one; enum options and missing descriptions
+    are filled in from the other side."""
+    merged = [dict(field) for field in first]
+    by_name = {field["name"]: field for field in merged}
+    conflicts: list[str] = []
+    for field in other:
+        current = by_name.get(field["name"])
+        if current is None:
+            merged.append(dict(field))
+            by_name[field["name"]] = merged[-1]
+            continue
+        path = f"{prefix}{field['name']}"
+        if current["type"] != field["type"]:
+            conflicts.append(f"{path}: kept {_describe(current)}; another exemplar suggested {_describe(field)}.")
+        elif current["array"] != field["array"]:
+            conflicts.append(f"{path}: one exemplar suggested a single value, another a list; kept a list.")
+        current["array"] = current["array"] or field["array"]
+        if not current["description"] and field["description"]:
+            current["description"] = field["description"]
+        if current["type"] == field["type"] == "enum":
+            current["options"] = list(dict.fromkeys(current["options"] + field["options"]))[:50]
+        elif current["type"] == field["type"] == "object":
+            current["fields"], nested = merge_field_lists(current["fields"], field["fields"], f"{path}.")
+            current["fields"] = current["fields"][:40]
+            conflicts += nested
+    return merged, conflicts
+
+
+def build_draft(name: str, description: str, fields: list) -> SchemaDraft:
+    """Sanitise proposed fields and validate them as a schema draft (ServiceError when unusable)."""
+    try:
+        return SchemaDraft.model_validate({
+            "name": str(name or "Document schema")[:200], "description": str(description or "")[:4_000],
+            "fields": sanitise_fields(fields)[:60],
+        })
+    except ValidationError as error:
+        raise ServiceError(f"The suggested schema was invalid: {error.errors()[0]['msg']}") from error
 
 
 def suggest_schema(documents: list[ParsedDocument], guidance: str, settings: Settings,
@@ -110,13 +165,6 @@ def suggest_schema(documents: list[ParsedDocument], guidance: str, settings: Set
         response_format=response_format(), operation="schema suggestion",
         reasoning_effort=reasoning_effort, max_completion_tokens=24_000, timeout=600,
     )
-    try:
-        draft = SchemaDraft.model_validate({
-            "name": str(response.get("name") or "Document schema")[:200],
-            "description": str(response.get("description") or "")[:4_000],
-            "fields": sanitise_fields(response.get("fields", []))[:60],
-        })
-    except ValidationError as error:
-        raise ServiceError(f"The suggested schema was invalid: {error.errors()[0]['msg']}") from error
+    draft = build_draft(response.get("name"), response.get("description"), response.get("fields", []))
     notes = [str(note)[:500] for note in response.get("notes", [])][:15]
     return draft, notes, usage

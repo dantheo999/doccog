@@ -6,7 +6,8 @@ from app.azure import ServiceError
 from app.documents import DocumentError, ParsedDocument
 from app.results import Leaf, Usage, annotate_plain, merge_annotated
 from app.schema import ExtractionSchema
-from app.solutions.base import Outcome, RunContext, SettingSpec, Solution
+from app.schema_suggest import build_draft, merge_field_lists, sanitise_fields
+from app.solutions.base import Outcome, RunContext, SettingSpec, Solution, SuggestionOutcome
 from app.text_chunks import chunk_text
 
 
@@ -17,6 +18,9 @@ def engine_settings() -> engine.NuExtractSettings:
         api_key=os.environ.get("NUEXTRACT_API_KEY", "EMPTY").strip() or "EMPTY",
         timeout=float(os.environ.get("NUEXTRACT_TIMEOUT", "1800")),
     )
+
+
+ERROR_STATUS = {"invalid_input": 422, "context_length": 413, "timeout": 504, "connection": 503, "unavailable": 503}
 
 
 def attach_confidences(record: dict, confidences: dict[tuple, float], offset: tuple = ()) -> dict:
@@ -51,6 +55,10 @@ class NuExtractSolution(Solution):
     route = "/apps/nuextract"
     accent = "#72d6bb"
     document_concurrency = 1
+    schema_suggestion_method = (
+        "Native template generation: NuExtract3's template-generation mode drafts a JSON extraction template "
+        "from each exemplar's text (with the guidance as its description), one call per exemplar since a 4B "
+        "model handles one document best; the templates are converted to schema fields and merged by name.")
 
     def settings_spec(self) -> list[SettingSpec]:
         return [
@@ -72,6 +80,62 @@ class NuExtractSolution(Solution):
             SettingSpec("image_dpi", "Page image DPI", "integer", 120, min=60, max=200,
                         help="Only used for page-image input."),
         ]
+
+    def suggestion_settings_spec(self) -> list[SettingSpec]:
+        return [
+            SettingSpec("enable_thinking", "Reasoning mode", "boolean", False,
+                        help="Think before writing the template. Much slower on CPU; NuMind's own chat template "
+                             "disables it for template generation."),
+            SettingSpec("max_tokens", "Maximum output tokens", "integer", 4096, min=256, max=32768,
+                        help="Upper bound on each generated template (and reasoning, if enabled)."),
+        ]
+
+    def suggest_schema(self, documents: list[ParsedDocument], guidance: str, settings: dict,
+                       context: RunContext) -> SuggestionOutcome:
+        generate = getattr(engine, "generate_template", None)
+        to_fields = getattr(engine, "template_to_fields", None)
+        if generate is None or to_fields is None:
+            raise ServiceError("NuExtract template generation is not available in this engine build yet.", 501)
+        options = self.resolve_suggestion_settings(settings)
+        fields: list[dict] = []
+        notes, conflicts, outputs, errors = [], [], [], []
+        usage = Usage()
+        for document in documents:
+            context.check()
+            try:
+                output = generate(engine_settings(), text=document.text, description=guidance.strip(),
+                                  enable_thinking=options["enable_thinking"], max_tokens=options["max_tokens"])
+            except engine.NuExtractError as error:
+                errors.append(error)
+                notes.append(f"No template for {document.name}: {error}")
+                continue
+            usage = usage.add(Usage(calls=1, prompt_tokens=output.usage.get("prompt_tokens", 0),
+                                    completion_tokens=output.usage.get("completion_tokens", 0)))
+            outputs.append({"document": document.name, "template": output.template, "raw": output.raw,
+                            "reasoning": output.reasoning, "elapsed_seconds": output.elapsed_seconds})
+            try:
+                proposed = sanitise_fields(to_fields(output.template)) if output.template else []
+            except ValueError as error:
+                proposed = []
+                notes.append(f"Could not convert the template for {document.name}: {error}")
+            if not proposed:
+                notes.append(f"NuExtract returned no usable template for {document.name}.")
+                continue
+            fields, found = merge_field_lists(fields, proposed)
+            conflicts += found
+        if not fields:
+            if errors:
+                raise ServiceError(str(errors[0]), ERROR_STATUS.get(errors[0].kind, 502))
+            raise ServiceError("NuExtract did not return a usable template for any exemplar.")
+        calls = len(documents)
+        summary = (f"NuExtract template generation ran once per exemplar ({calls} call{'s' if calls != 1 else ''})"
+                   + ("; the field lists were merged by name (the first type wins)." if usage.calls > 1 else "."))
+        notes = [summary] + [f"Conflict at {conflict}" for conflict in conflicts[:15]] + notes
+        draft = build_draft("NuExtract3 template schema",
+                            f"Merged from NuExtract3 templates for: {', '.join(d.name for d in documents)}.",
+                            fields)
+        return SuggestionOutcome(draft=draft, notes=notes, usage=usage,
+                                 raw={"description": guidance.strip(), "outputs": outputs})
 
     def status(self) -> dict:
         settings = engine_settings()

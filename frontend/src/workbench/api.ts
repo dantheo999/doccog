@@ -1,6 +1,6 @@
 import type {
-  Collection, Comparison, ExtractionSchema, Run, RunSummary, SchemaDraft, SchemaSummary, SolutionInfo,
-  StoredDocument, Usage,
+  Collection, Comparison, ExtractionSchema, Run, RunSummary, SchemaDraft, SchemaSuggestion, SchemaSummary,
+  SharedSuggestionResult, SolutionInfo, StoredDocument,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -57,9 +57,16 @@ export const workbench = {
   starterSchema: () => request<SchemaDraft>("/schemas/starter"),
   saveSchema: (draft: SchemaDraft, schemaId: string | null, exemplars?: string[]) =>
     request<ExtractionSchema>("/schemas", json("POST", { draft, schema_id: schemaId, exemplars })),
+  /** The shared, solution-neutral suggestion (also persisted as a suggestion with solution "shared"). */
   suggestSchema: (documentIds: string[], guidance: string, reasoningEffort: string) =>
-    request<{ draft: SchemaDraft; notes: string[]; usage: Usage; exemplars: string[] }>("/schemas/suggest",
+    request<SharedSuggestionResult>("/schemas/suggest",
       json("POST", { document_ids: documentIds, guidance, reasoning_effort: reasoningEffort })),
+  /** One solution's own schema suggestion (synchronous; local models can take minutes). */
+  suggestSchemaWith: (solutionId: string, documentIds: string[], guidance: string, settings: Record<string, unknown>) =>
+    request<SchemaSuggestion>(`/solutions/${solutionId}/suggest-schema`,
+      json("POST", { document_ids: documentIds, guidance, settings })),
+  schemaSuggestions: () => request<SchemaSuggestion[]>("/schema-suggestions"),
+  deleteSchemaSuggestion: (id: string) => request<{ deleted: string }>(`/schema-suggestions/${id}`, { method: "DELETE" }),
 
   runs: () => request<RunSummary[]>("/runs"),
   run: (id: string) => request<Run>(`/runs/${id}`),

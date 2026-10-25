@@ -51,6 +51,17 @@ export interface SolutionInfo {
   external_url: string | null;
   settings: SettingSpec[];
   status: SolutionStatus;
+  /** Optional per-solution schema suggestion (absent on older backends). */
+  schema_suggestion?: SchemaSuggestionCapability;
+}
+
+/** How (or why not) a solution suggests a schema from exemplar documents. */
+export interface SchemaSuggestionCapability {
+  supported: boolean;
+  /** The method when supported, otherwise the reason it is not. */
+  method: string;
+  /** Suggestion-only settings, rendered with SettingsForm. */
+  settings: SettingSpec[];
 }
 
 export interface CollectionDocument {
@@ -197,4 +208,32 @@ export interface Comparison {
   cells: CompareCell[];
   warnings: string[];
   thresholds: { match: number; pair: number };
+}
+
+/** A persisted schema suggestion: the shared, solution-neutral one (solution "shared") or a solution's own. */
+export interface SchemaSuggestion {
+  id: string;
+  solution: string;
+  solution_name: string;
+  method: string;
+  draft: SchemaDraft;
+  notes: string[];
+  usage: Usage;
+  elapsed_seconds: number;
+  exemplars: string[];
+  document_ids: string[];
+  guidance: string;
+  settings: Record<string, unknown>;
+  created_at: string;
+  raw?: unknown;
+}
+
+/** Response of POST /api/schemas/suggest (the shared suggestion). id and elapsed_seconds are absent on older backends. */
+export interface SharedSuggestionResult {
+  draft: SchemaDraft;
+  notes: string[];
+  usage: Usage;
+  exemplars: string[];
+  id?: string;
+  elapsed_seconds?: number;
 }

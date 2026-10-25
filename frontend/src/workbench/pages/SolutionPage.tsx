@@ -10,6 +10,7 @@ import RunViewer from "../components/RunViewer";
 import LangExtractStudio from "../../LangExtractStudio";
 import { loadRecipe } from "../../recipe";
 import UnstractPanel from "../components/UnstractPanel";
+import { SolutionSuggestPanel } from "../components/SchemaSuggestions";
 
 const settingsKey = (id: string) => `doc-cognition.settings.${id}`;
 
@@ -44,7 +45,11 @@ export default function SolutionPage({ solution, onRefresh }: Props) {
     {tab === "studio" ? <div className="studio-host"><LangExtractStudio embedded /></div>
       : <RunsWorkbench solution={solution}
         extra={isLangExtract ? recipeRequirement : undefined}
-        aside={solution.id === "unstract" ? <UnstractPanel solution={solution} /> : undefined} />}
+        aside={<>
+          {/* Test this solution's own schema suggestion (or say why it has none), above Runs. */}
+          <SolutionSuggestPanel solution={solution} />
+          {solution.id === "unstract" && <UnstractPanel solution={solution} />}
+        </>} />}
   </div>;
 }
 

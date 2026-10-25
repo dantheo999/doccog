@@ -9,7 +9,7 @@ from pydantic import JsonValue
 from app.azure import ServiceError
 from app.documents import DocumentStore, ParsedDocument
 from app.results import Usage
-from app.schema import ExtractionSchema
+from app.schema import ExtractionSchema, SchemaDraft
 
 
 @dataclass(frozen=True)
@@ -54,6 +54,26 @@ class Outcome:
 
 
 @dataclass
+class SuggestionOutcome:
+    """A schema proposed by a solution from exemplar documents, with notes and spend."""
+    draft: SchemaDraft
+    notes: list[str] = field(default_factory=list)
+    usage: Usage = field(default_factory=Usage)
+    raw: JsonValue = None
+
+
+def resolve(specs: list[SettingSpec], settings: dict) -> dict:
+    """Defaults overlaid with any valid known keys; unknown keys and invalid values are ignored."""
+    resolved = {}
+    for spec in specs:
+        try:
+            resolved[spec.key] = spec.validate(settings.get(spec.key))
+        except ServiceError:
+            resolved[spec.key] = spec.default
+    return resolved
+
+
+@dataclass
 class RunContext:
     store: DocumentStore
     cancel: threading.Event = field(default_factory=threading.Event)
@@ -76,19 +96,15 @@ class Solution(ABC):
     accent: str = "#b4a2ff"
     document_concurrency: int = 1
     external_url: str | None = None  # a packaged third-party UI the landing page can launch
+    schema_suggestion_method: str | None = None  # how the solution proposes a schema; None = unsupported
+    schema_suggestion_unsupported: str = "This solution does not suggest schemas."
 
     def settings_spec(self) -> list[SettingSpec]:
         return []
 
     def resolve_settings(self, settings: dict) -> dict:
         """Defaults overlaid with any valid known keys (for previews and pre-processing)."""
-        resolved = {}
-        for spec in self.settings_spec():
-            try:
-                resolved[spec.key] = spec.validate(settings.get(spec.key))
-            except ServiceError:
-                resolved[spec.key] = spec.default
-        return resolved
+        return resolve(self.settings_spec(), settings)
 
     def preview(self, schema: ExtractionSchema, settings: dict) -> dict[str, str]:
         """Named text blocks showing what the solution sends for this schema."""
@@ -117,6 +133,19 @@ class Solution(ABC):
                 context: RunContext) -> Outcome:
         """Extract one document. Raise ServiceError with a user-facing message on failure."""
 
+    # -- optional capability: propose a schema from exemplar documents --------------------
+
+    def suggestion_settings_spec(self) -> list[SettingSpec]:
+        return []
+
+    def resolve_suggestion_settings(self, settings: dict) -> dict:
+        return resolve(self.suggestion_settings_spec(), settings)
+
+    def suggest_schema(self, documents: list[ParsedDocument], guidance: str, settings: dict,
+                       context: RunContext) -> SuggestionOutcome:
+        """Propose a schema from 1-5 exemplars. Only called when schema_suggestion_method is set."""
+        raise ServiceError(self.schema_suggestion_unsupported, 422)
+
     def info(self) -> dict:
         return {
             "id": self.id, "name": self.name, "tagline": self.tagline, "description": self.description,
@@ -124,4 +153,9 @@ class Solution(ABC):
             "confidence_method": self.confidence_method, "route": self.route, "accent": self.accent,
             "external_url": self.external_url,
             "settings": [asdict(spec) for spec in self.settings_spec()], "status": self.status(),
+            "schema_suggestion": {
+                "supported": self.schema_suggestion_method is not None,
+                "method": self.schema_suggestion_method or self.schema_suggestion_unsupported,
+                "settings": [asdict(spec) for spec in self.suggestion_settings_spec()],
+            },
         }

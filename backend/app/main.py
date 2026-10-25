@@ -1,12 +1,13 @@
 import logging
 import threading
+import time
 from uuid import uuid4
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, model_validator
 
 from app.azure import REASONING_EFFORTS, ServiceError
 from app.cognition import CognitionError, extract_document, generate_recipe, optimize_recipe
@@ -14,15 +15,16 @@ from app.compare import compare_runs
 from app.documents import DocumentError, DocumentStore, MAX_UPLOAD_BYTES, parse_document
 from app.jobs import JobRunner
 from app.models import ExtractRequest, GenerateRequest, OptimizationProposal, OptimizeRequest, Recipe, StrictModel
-from app.results import DocumentResult, ImportedRecord, Run, RunCreate, RunImport, annotate_plain, finalise
+from app.results import DocumentResult, ImportedRecord, Run, RunCreate, RunImport, Usage, annotate_plain, finalise
 from app.schema import SchemaDraft, meeting_minutes_schema
-from app.schema_suggest import suggest_schema
+from app.schema_suggest import SHARED_METHOD, suggest_schema
 from app.settings import data_dir, load_settings
 from app.solutions import build_registry
 from app.solutions.base import RunContext
 from app.solutions.langextract import class_guide
 from app.unstract_export import import_records
-from app.storage import CollectionCreate, CollectionDocument, CollectionStore, RunStore, SchemaStore, now
+from app.storage import (CollectionCreate, CollectionDocument, CollectionStore, RunStore, SchemaStore, SchemaSuggestion,
+                         SuggestionStore, now)
 
 
 app = FastAPI(title="Document Cognition", docs_url="/api/docs", openapi_url="/api/openapi.json")
@@ -31,6 +33,7 @@ store = DocumentStore(root)
 collections = CollectionStore(root)
 schemas = SchemaStore(root)
 runs = RunStore(root)
+suggestions = SuggestionStore(root)
 runner = JobRunner(runs, store)
 solutions = build_registry()
 model_lock = threading.Lock()
@@ -202,13 +205,73 @@ def delete_schema(schema_id: str):
     return {"deleted": schema_id}
 
 
+def save_suggestion(solution: str, solution_name: str, method: str, draft: SchemaDraft, notes: list[str], usage: Usage,
+                    started: float, documents: list, guidance: str, settings: dict, raw: JsonValue = None
+                    ) -> SchemaSuggestion:
+    return suggestions.save(SchemaSuggestion(
+        id=uuid4().hex[:16], solution=solution, solution_name=solution_name, method=method, draft=draft,
+        notes=notes, usage=usage, elapsed_seconds=round(time.monotonic() - started, 3),
+        exemplars=[document.name for document in documents], document_ids=[document.id for document in documents],
+        guidance=guidance, settings=settings, created_at=now(), raw=raw))
+
+
 @app.post("/api/schemas/suggest")
 def suggest(request: SuggestRequest):
+    """The shared, solution-neutral suggestion (persisted with solution "shared" for comparison)."""
     if request.reasoning_effort not in REASONING_EFFORTS:
         raise HTTPException(422, f"reasoning_effort must be one of {', '.join(REASONING_EFFORTS)}.")
     documents = [store.get(document_id) for document_id in dict.fromkeys(request.document_ids)]
+    started = time.monotonic()
     draft, notes, usage = suggest_schema(documents, request.guidance, settings_or_error(), request.reasoning_effort)
-    return {"draft": draft, "notes": notes, "usage": usage, "exemplars": [document.name for document in documents]}
+    saved = save_suggestion("shared", "Shared suggestion", SHARED_METHOD, draft, notes, usage, started, documents,
+                            request.guidance, {"reasoning_effort": request.reasoning_effort})
+    return {"draft": draft, "notes": notes, "usage": usage, "exemplars": saved.exemplars,
+            "id": saved.id, "elapsed_seconds": saved.elapsed_seconds}
+
+
+class SolutionSuggestRequest(StrictModel):
+    document_ids: list[str] = Field(min_length=1, max_length=5)
+    guidance: str = Field(default="", max_length=4_000)
+    settings: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def check_distinct(self):
+        if len(set(self.document_ids)) != len(self.document_ids):
+            raise ValueError("Exemplar document IDs must be distinct.")
+        return self
+
+
+@app.post("/api/solutions/{solution_id}/suggest-schema")
+def suggest_with_solution(solution_id: str, request: SolutionSuggestRequest):
+    """A solution's own schema suggestion (synchronous; independent of the interactive model lock)."""
+    solution = solution_or_404(solution_id)
+    if solution.schema_suggestion_method is None:
+        raise HTTPException(422, solution.schema_suggestion_unsupported)
+    status = solution.status()
+    if not status.get("ready"):
+        raise HTTPException(503, status.get("detail") or f"{solution.name} is not ready.")
+    settings = solution.resolve_suggestion_settings(request.settings)
+    documents = [store.get(document_id) for document_id in request.document_ids]
+    started = time.monotonic()
+    outcome = solution.suggest_schema(documents, request.guidance, settings, RunContext(store=store))
+    return save_suggestion(solution.id, solution.name, solution.schema_suggestion_method, outcome.draft,
+                           outcome.notes, outcome.usage, started, documents, request.guidance, settings, outcome.raw)
+
+
+@app.get("/api/schema-suggestions")
+def list_suggestions():
+    return suggestions.list()
+
+
+@app.get("/api/schema-suggestions/{suggestion_id}")
+def get_suggestion(suggestion_id: str):
+    return suggestions.get(suggestion_id)
+
+
+@app.delete("/api/schema-suggestions/{suggestion_id}")
+def delete_suggestion(suggestion_id: str):
+    suggestions.delete(suggestion_id)
+    return {"deleted": suggestion_id}
 
 
 # --- Runs and comparison -----------------------------------------------------------------

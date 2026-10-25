@@ -66,6 +66,7 @@ beforeEach(() => {
     if (input === "/api/documents" && init?.method === "POST") return Response.json({ id: "d1", name: "a.txt", text, characters: 33, pages: null });
     if (input === "/api/schemas/s1") return Response.json(schema);
     if (input === "/api/schemas/suggest") return Response.json({ draft, notes: ["Attendance varies."], usage: {}, exemplars: ["a.txt"] });
+    if (input === "/api/schema-suggestions") return Response.json([]);
     if (input === "/api/schemas" && init?.method === "POST") return Response.json(schema);
     return Response.json({ detail: `Unexpected ${input}` }, { status: 500 });
   }));

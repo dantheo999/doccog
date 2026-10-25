@@ -18,13 +18,14 @@ import re
 
 from pydantic import JsonValue
 
+from app import schema_suggest
 from app.azure import REASONING_EFFORTS, OutputLimitError, ServiceError, chat_json, make_client
 from app.documents import ParsedDocument
 from app.grounding import TRANSLATE, Grounder
 from app.results import Leaf, Usage, merge_annotated, plain
 from app.schema import ExtractionSchema, SchemaField, coerce_scalar, field_guide, is_empty
 from app.settings import Settings, load_settings
-from app.solutions.base import Outcome, RunContext, SettingSpec, Solution
+from app.solutions.base import Outcome, RunContext, SettingSpec, Solution, SuggestionOutcome
 
 
 # --------------------------------------------------------------------------------------------
@@ -556,6 +557,9 @@ class LLMSolution(Solution):
     route = "/apps/llm"
     accent = "#7cc4ff"
     document_concurrency = 4
+    schema_suggestion_method = (
+        "Same approach as the shared suggestion: one Azure OpenAI call reads the exemplars' full text and "
+        "returns a schema as strict JSON, run here with this solution's own reasoning-effort setting.")
 
     def __init__(self, azure: Settings | None = None):
         self._azure_settings = azure
@@ -602,6 +606,19 @@ class LLMSolution(Solution):
         options = self._options(settings)
         label = f"{self.status().get('model') or 'Azure OpenAI'} · {options['reasoning_effort']} reasoning"
         return label + (" · self-check" if options["self_check"] else "")
+
+    # -- schema suggestion ------------------------------------------------------------------
+
+    def suggestion_settings_spec(self) -> list[SettingSpec]:
+        return [SettingSpec("reasoning_effort", "Reasoning effort", "select", "medium",
+                            "How much the model thinks before proposing the schema.",
+                            options=list(REASONING_EFFORTS))]
+
+    def suggest_schema(self, documents: list[ParsedDocument], guidance: str, settings: dict,
+                       context: RunContext) -> SuggestionOutcome:
+        effort = self.resolve_suggestion_settings(settings)["reasoning_effort"]
+        draft, notes, usage = schema_suggest.suggest_schema(documents, guidance, self._azure(), effort)
+        return SuggestionOutcome(draft=draft, notes=notes, usage=usage)
 
     # -- extraction -------------------------------------------------------------------------
 

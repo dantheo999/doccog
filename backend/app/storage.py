@@ -1,4 +1,4 @@
-"""Small JSON-file stores for collections, schemas and runs under the data directory."""
+"""Small JSON-file stores for collections, schemas, schema suggestions and runs under the data directory."""
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -7,11 +7,11 @@ import shutil
 import threading
 from uuid import uuid4
 
-from pydantic import Field
+from pydantic import Field, JsonValue
 
 from app.documents import DocumentError, atomic_write
 from app.models import StrictModel
-from app.results import Run
+from app.results import Run, Usage
 from app.schema import ExtractionSchema, SchemaDraft
 
 
@@ -175,6 +175,51 @@ class SchemaStore:
 
     def delete(self, schema_id: str):
         self.files.delete(schema_id)
+
+
+class SchemaSuggestion(StrictModel):
+    """A proposed schema, from the shared suggestion (solution "shared") or one solution's own method."""
+    id: str
+    solution: str
+    solution_name: str
+    method: str
+    draft: SchemaDraft
+    notes: list[str] = Field(default_factory=list)
+    usage: Usage = Field(default_factory=Usage)
+    elapsed_seconds: float = 0
+    exemplars: list[str] = Field(default_factory=list)
+    document_ids: list[str] = Field(default_factory=list)
+    guidance: str = ""
+    settings: dict[str, JsonValue] = Field(default_factory=dict)
+    created_at: str
+    raw: JsonValue = None
+
+
+class SuggestionStore:
+    def __init__(self, root: Path | None):
+        self.files = JsonFiles(root, "suggestions")
+
+    def save(self, suggestion: SchemaSuggestion) -> SchemaSuggestion:
+        self.files.write(suggestion.id, suggestion.model_dump(mode="json"))
+        return suggestion
+
+    def get(self, suggestion_id: str) -> SchemaSuggestion:
+        data = self.files.read(suggestion_id)
+        if data is None:
+            raise DocumentError("Schema suggestion not found.", 404)
+        return SchemaSuggestion.model_validate(data)
+
+    def list(self, limit: int = 100) -> list[dict]:
+        """Newest first, without the (possibly large) raw output."""
+        items = []
+        for key in self.files.keys():
+            data = self.files.read(key)
+            if data and "created_at" in data:
+                items.append({k: v for k, v in data.items() if k != "raw"})
+        return sorted(items, key=lambda item: item["created_at"], reverse=True)[:limit]
+
+    def delete(self, suggestion_id: str):
+        self.files.delete(suggestion_id)
 
 
 class RunStore:
