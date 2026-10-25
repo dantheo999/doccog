@@ -10,6 +10,7 @@ from fastapi import Body, FastAPI, Form, HTTPException, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import Field, JsonValue, ValidationError, model_validator
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.azure import REASONING_EFFORTS, ServiceError
 from app.cognition import CognitionError, extract_document, generate_recipe, optimize_recipe
@@ -20,7 +21,7 @@ from app.models import ExtractRequest, GenerateRequest, OptimizationProposal, Op
 from app.results import DocumentResult, ImportedRecord, Run, RunCreate, RunImport, Usage, annotate_plain, finalise
 from app.schema import SchemaDraft, meeting_minutes_schema
 from app.schema_suggest import SHARED_METHOD, suggest_schema
-from app.settings import data_dir, load_settings
+from app.settings import allowed_hosts, data_dir, load_settings
 from app.solutions import build_registry
 from app.solutions.base import RunContext
 from app.solutions.langextract import class_guide
@@ -30,6 +31,7 @@ from app.storage import (CollectionCreate, CollectionDocument, CollectionStore, 
 
 
 app = FastAPI(title="Document Cognition", docs_url="/api/docs", openapi_url="/api/openapi.json")
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts())
 root = data_dir()
 store = DocumentStore(root)
 collections = CollectionStore(root)
@@ -382,20 +384,31 @@ def import_unstract(request: UnstractImport):
     return {**run.summary(), "warnings": list(dict.fromkeys(warnings))}
 
 
+def unfinished(summary: dict) -> dict:
+    """Close a queued/running run whose runner is gone (e.g. a backend restart within the stale
+    window), so it does not show as running forever."""
+    if summary["status"] in ("queued", "running") and not runner.active(summary["id"]):
+        try:
+            return runner.reconcile(runs.get(summary["id"])).summary()
+        except (DocumentError, ValueError):
+            return summary
+    return summary
+
+
 @app.get("/api/runs")
 def list_runs():
-    return [{**summary, "active": runner.active(summary["id"])} for summary in runs.list()]
+    return [{**summary, "active": runner.active(summary["id"])} for summary in map(unfinished, runs.list())]
 
 
 @app.get("/api/runs/{run_id}")
 def get_run(run_id: str):
-    run = runs.get(run_id)
+    run = runner.reconcile(runs.get(run_id))
     return {**run.model_dump(mode="json"), "summary": run.summary(), "active": runner.active(run_id)}
 
 
 @app.post("/api/runs/{run_id}/cancel")
 def cancel_run(run_id: str):
-    runs.get(run_id)
+    runner.reconcile(runs.get(run_id))
     return {"cancelled": runner.cancel(run_id)}
 
 

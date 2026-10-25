@@ -1,6 +1,7 @@
 """Shared extraction schema: the agreed property set every solution extracts against."""
 from collections.abc import Iterator
 from datetime import date, datetime
+from decimal import Decimal
 import re
 from typing import Annotated, Literal
 
@@ -132,8 +133,9 @@ def parse_date(value: str) -> date | None:
     except ValueError:
         pass
     cleaned = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", text.casefold())
-    cleaned = re.sub(r"^(mon|tues|wednes|thurs|fri|satur|sun)day,?\s+", "", cleaned)
-    match = re.match(r"^(\d{1,2})\s+([a-z]+)\.?,?\s+(\d{4})$", cleaned)
+    cleaned = re.sub(r"^(mon|tue|tues|wed|wednes|thu|thur|thurs|fri|sat|satur|sun)(day)?\.?,?\s+", "", cleaned)
+    # "22 October 2019", "22 of October 2019", "22-Oct-2019", "22/Oct/2019"
+    match = re.match(r"^(\d{1,2})(?:\s+of\s+|\s+|[-/])([a-z]+)\.?(?:,?\s+|[-/])(\d{4})$", cleaned)
     if match:
         day, month, year = match.groups()
     else:
@@ -159,6 +161,24 @@ def parse_date(value: str) -> date | None:
         return None
 
 
+DASHES = str.maketrans({"\u2212": "-", "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-",
+                        "\u2014": "-", "\ufe63": "-", "\uff0d": "-"})
+MAGNITUDES = {"k": 3, "thousand": 3, "m": 6, "mn": 6, "million": 6, "bn": 9, "billion": 9, "tn": 12, "trillion": 12}
+NUMBER = re.compile(r"(-?)[^\d-]*?(-?[\d,]*\.?\d+)(?:([km])|\s*(thousand|million|billion|trillion|mn|bn|tn))?\b([^\d]*)",
+                    re.IGNORECASE)
+
+
+def parse_number(text: str) -> int | float | None:
+    """A number written in text: currency/units around it, a typographic minus, a magnitude word."""
+    match = NUMBER.fullmatch(text.translate(DASHES))
+    if not match:
+        return None
+    sign, digits, letter, word, _ = match.groups()
+    number = Decimal(("" if digits.startswith("-") else sign) + digits.replace(",", ""))
+    number = number.scaleb(MAGNITUDES[(letter or word).lower()] if letter or word else 0)
+    return int(number) if number == number.to_integral_value() else float(number)
+
+
 def coerce_scalar(value: JsonValue, field: SchemaField) -> JsonValue:
     """Normalise a model-produced scalar to the field type; unparseable values stay as strings."""
     if value is None or isinstance(value, (dict, list)):
@@ -177,11 +197,9 @@ def coerce_scalar(value: JsonValue, field: SchemaField) -> JsonValue:
             return str(value)
         if isinstance(value, (int, float)):
             return int(value) if field.type == "integer" and float(value).is_integer() else value
-        match = re.fullmatch(r"[^\d-]*(-?[\d,]*\.?\d+)[^\d]*", str(value))
-        if not match:
-            return str(value)
-        number = float(match.group(1).replace(",", ""))
-        return int(number) if field.type == "integer" or number.is_integer() else number
+        # A non-integral value for an integer field stays as written (as for JSON numbers).
+        number = parse_number(str(value))
+        return str(value) if number is None else number
     if field.type == "boolean":
         if isinstance(value, bool):
             return value

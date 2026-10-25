@@ -525,3 +525,46 @@ def test_stitch_does_not_join_conflicting_items():
 def merge_annotated_for(schema, records):
     from app.results import merge_annotated
     return plain(merge_annotated(schema.fields, records))
+
+
+def test_stitch_prefix_rule_needs_quotes_of_the_same_text():
+    from app.solutions.llm import Chunk, stitch
+    schema = make_schema()
+    person = lambda name: {"name": Leaf(name, name, 0.95), "role": Leaf(None),  # noqa: E731
+                           "attendance": Leaf("present", "Present", 0.9)}
+
+    def run(text, cut, start, earlier, later):
+        one, two = to_record({}, schema.fields), to_record({}, schema.fields)
+        one["attendees"], two["attendees"] = [person(name) for name in earlier], [person(name) for name in later]
+        records, joined = stitch(schema.fields, [(Chunk(0, cut, text[:cut]), one),
+                                                 (Chunk(start, len(text), text[start:]), two)])
+        return joined, [entry["name"] for entry in merge_annotated_for(schema, records)["attendees"]]
+
+    # Different people sharing a prefix across the boundary stay apart.
+    text = "Present:\nAnn Lee\nJohn Smith\nJohn Smithson\nPeter Wu\n"
+    assert run(text, text.index("John Smithson"), text.index("John Smith"), ["Ann Lee", "John Smith"],
+               ["John Smith", "John Smithson", "Peter Wu"]) == (1, ["Ann Lee", "John Smith", "John Smithson", "Peter Wu"])
+    # A name cut off by the split joins its full form, which quotes the same text.
+    text = "Present:\nAnn Lee\nJohn Smithson\nPeter Wu\n"
+    joined, names = run(text, text.index("John Smithson") + 8, text.index("John Smithson"), ["Ann Lee", "John Smi"],
+                        ["John Smithson", "Peter Wu"])
+    assert joined == 1 and len(names) == 3 and names[-1] == "Peter Wu"
+
+
+def test_stitch_items_without_single_values_need_shared_list_evidence():
+    from app.solutions.llm import Chunk, stitch
+    schema = make_schema({"name": "Policy", "fields": [{"name": "sections", "type": "object", "array": True, "fields": [
+        {"name": "headings", "type": "verbatim", "array": True}, {"name": "rules", "type": "text", "array": True}]}]})
+    text = "1. Scope\nApplies to staff.\n2. Leave\n25 days a year.\n"
+    first = Chunk(0, text.index("25 days"), text[:text.index("25 days")])
+    second = Chunk(text.index("2. Leave"), len(text), text[text.index("2. Leave"):])
+    section = lambda heading, rule: {"headings": [Leaf(heading, heading)], "rules": [Leaf(rule, rule)]}  # noqa: E731
+    records, joined = stitch(schema.fields, [(first, {"sections": [section("1. Scope", "Applies to staff.")]}),
+                                             (second, {"sections": [section("2. Leave", "25 days a year.")]})])
+    assert joined == 0 and [len(record["sections"]) for record in records] == [1, 1]
+    records, joined = stitch(schema.fields, [
+        (first, {"sections": [section("1. Scope", "Applies to staff."), {"headings": [Leaf("2. Leave", "2. Leave")],
+                                                                          "rules": []}]}),
+        (second, {"sections": [section("2. Leave", "25 days a year.")]})])
+    assert joined == 1 and merge_annotated_for(schema, records)["sections"][1] == {
+        "headings": ["2. Leave"], "rules": ["25 days a year."]}

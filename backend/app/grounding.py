@@ -104,8 +104,9 @@ class Grounder:
         return Match(self._starts[start], self._ends[end - 1], "fuzzy", round(alignment.score, 1))
 
     def find(self, needle: str, near: int | None = None, window: tuple[int, int] | None = None,
-             fuzzy: bool = True, min_score: float = 87.0) -> Match | None:
-        """Find needle: exact, then normalised (case/space/quotes), then fuzzy; inside window first."""
+             fuzzy: bool = True, min_score: float = 87.0, global_fallback: bool = True) -> Match | None:
+        """Find needle: exact, then normalised (case/space/quotes), then fuzzy; inside window first,
+        then (unless global_fallback is off) anywhere in the text."""
         if not isinstance(needle, str) or not needle.strip():
             return None
         stripped = needle.strip()
@@ -113,7 +114,7 @@ class Grounder:
         exact = [(index, index + len(stripped)) for index in self._occurrences(self.text, stripped)]
         loose = [(self._starts[index], self._ends[index + len(target) - 1])
                  for index in self._occurrences(self._norm, target)] if target else []
-        scopes = ([window] if window else []) + [None]
+        scopes = ([window] if window else []) + ([None] if global_fallback or not window else [])
         for scope in scopes:
             def inside(items):
                 return [item for item in items if scope is None or (item[0] >= scope[0] and item[1] <= scope[1])]
@@ -158,19 +159,26 @@ class Grounder:
             if isinstance(value, (int, float)):
                 renderings += [f"{value:,}", f"{value:,.2f}"] if not float(value).is_integer() else [f"{int(value):,}"]
             # Bare numbers are ambiguous; only ground them near their item.
-            return self._first(renderings, near, window, fuzzy=False) if window or len(str(value)) > 3 else None
+            if not window and len(str(value)) <= 3:
+                return None
+            return self._first(renderings, near, window, global_fallback=False)
         if field.type == "enum":
-            return self._first([str(value)], near, window, fuzzy=False) if window else None
+            return self._first([str(value)], near, window, global_fallback=False) if window else None
         return None
 
     def _first(self, renderings: list[str], near: int | None, window: tuple[int, int] | None,
-               fuzzy: bool = False) -> Match | None:
-        seen = set()
-        for rendering in renderings:
-            if rendering in seen:
-                continue
-            seen.add(rendering)
-            match = self.find(rendering, near, window, fuzzy=fuzzy)
+               fuzzy: bool = False, global_fallback: bool = True) -> Match | None:
+        """The first rendering found: every rendering inside the window before any search elsewhere."""
+        unique = list(dict.fromkeys(renderings))
+        if window:
+            for rendering in unique:
+                match = self.find(rendering, near, window, fuzzy=fuzzy, global_fallback=False)
+                if match:
+                    return match
+            if not global_fallback:
+                return None
+        for rendering in unique:
+            match = self.find(rendering, near, None, fuzzy=fuzzy)
             if match:
                 return match
         return None

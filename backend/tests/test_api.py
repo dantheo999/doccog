@@ -14,6 +14,14 @@ def test_health_does_not_require_model_credentials():
     assert response.json()["status"] == "ok"
 
 
+def test_api_answers_only_local_host_headers():
+    """A DNS-rebinding page reaches the API with its own host name in the Host header."""
+    assert client.get("/api/health", headers={"host": "rebind.attacker.example"}).status_code == 400
+    assert client.get("/api/collections", headers={"host": "rebind.attacker.example:8088"}).status_code == 400
+    for host in ("localhost:8088", "127.0.0.1:8010", "[::1]:5173", "backend:8000"):
+        assert client.get("/api/health", headers={"host": host}).status_code == 200
+
+
 def test_upload_returns_canonical_text():
     response = client.post("/api/documents", files={"file": ("a.txt", b"Alice signed.", "text/plain")})
     assert response.status_code == 200

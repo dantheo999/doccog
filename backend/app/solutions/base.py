@@ -1,6 +1,7 @@
 """Contract every extraction solution implements so it can be run, compared and listed."""
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
+import math
 import threading
 from typing import Any, Literal
 
@@ -30,7 +31,7 @@ class SettingSpec:
             if not isinstance(value, bool):
                 raise ServiceError(f"{self.label} must be true or false.", 422)
         elif self.type in ("integer", "number"):
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or (
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or (
                     self.type == "integer" and not float(value).is_integer()):
                 raise ServiceError(f"{self.label} must be a {'whole ' if self.type == 'integer' else ''}number.", 422)
             value = int(value) if self.type == "integer" else float(value)

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, Braces, CircleCheck, CircleX, Download, LoaderCircle, X } from "lucide-react";
+import { AlertCircle, Braces, CircleCheck, CircleX, Download, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { message, workbench } from "../api";
 import type { Run, StoredDocument } from "../types";
 import { downloadJson } from "../../recipe";
@@ -18,18 +18,31 @@ export default function RunViewer({ runId, onClose }: { runId: string; onClose: 
   const [selected, setSelected] = useState<string | null>(null);
   const [raw, setRaw] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [documentError, setDocumentError] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
 
   useEffect(() => {
     let active = true;
     let timer: ReturnType<typeof setTimeout>;
+    let live = false;
+    let failures = 0;
     const load = async () => {
       try {
         const next = await workbench.run(runId);
         if (!active) return;
+        failures = 0;
         setRun(next);
+        setError(null);
         setDocumentId(current => current ?? next.documents[0]?.document_id ?? null);
-        if (next.active || next.status === "queued" || next.status === "running") timer = setTimeout(load, 2000);
-      } catch (failure) { if (active) setError(message(failure)); }
+        live = next.active || next.status === "queued" || next.status === "running";
+        if (live) timer = setTimeout(load, 2000);
+      } catch (failure) {
+        if (!active) return;
+        // Keep following a live run through failed polls (e.g. a backend restart), backing off.
+        failures += 1;
+        setError(live ? `${message(failure)} Retrying…` : message(failure));
+        if (live) timer = setTimeout(load, Math.min(30_000, 2000 * 2 ** Math.min(failures, 4)));
+      }
     };
     void load();
     return () => { active = false; clearTimeout(timer); };
@@ -39,15 +52,19 @@ export default function RunViewer({ runId, onClose }: { runId: string; onClose: 
     if (!documentId) return;
     let active = true;
     setSelected(null);
+    setSource(null);
+    setDocumentError(null);
     workbench.document(documentId).then(next => { if (active) setSource(next); })
-      .catch(failure => { if (active) { setSource(null); setError(message(failure)); } });
+      .catch(failure => { if (active) setDocumentError(message(failure)); });
     return () => { active = false; };
-  }, [documentId]);
+  }, [documentId, reload]);
 
   const result = run?.documents.find(item => item.document_id === documentId) ?? null;
+  // The previous document stays loaded until the next one arrives; never mix their offsets.
+  const shown = source && source.id === documentId ? source : null;
   const grounded = result ? result.values.filter(value => value.grounding !== "none").length : 0;
   const confidences = useMemo(() => result?.values.map(value => value.confidence).filter((value): value is number => value !== null) ?? [], [result]);
-  const stale = source && result && source.sha256 !== result.document_sha256;
+  const stale = shown && result && shown.sha256 !== result.document_sha256;
 
   if (error && !run) return <div className="notice error"><AlertCircle size={16} /><span>{error}</span></div>;
   if (!run) return <p className="microcopy"><LoaderCircle size={13} className="spin" /> Loading run…</p>;
@@ -65,6 +82,8 @@ export default function RunViewer({ runId, onClose }: { runId: string; onClose: 
         onClick={() => downloadJson(run, `${run.label.replace(/[^\w.-]+/g, "_")}.run.json`)}><Download size={14} /></button>
       <button className="icon-button" aria-label="Close run" onClick={onClose}><X size={14} /></button>
     </div>
+    {error && <div className="notice warning" role="alert"><AlertCircle size={16} /><span>Could not refresh this run: {error}</span>
+      <button aria-label="Dismiss" onClick={() => setError(null)}><X size={14} /></button></div>}
     {run.error && <div className="notice error"><AlertCircle size={16} /><span>{run.error}</span></div>}
     <div className="run-viewer-body">
       <ul className="run-docs" aria-label="Documents in this run">
@@ -77,9 +96,12 @@ export default function RunViewer({ runId, onClose }: { runId: string; onClose: 
       <div className="run-source">
         {result?.status === "error" && <div className="notice error"><AlertCircle size={16} /><span>{result.error}</span></div>}
         {stale && <div className="notice warning"><span>The stored document text changed after this run; highlights may be misplaced.</span></div>}
-        {source ? <ValueHighlighter text={source.text} values={result?.status === "done" ? result.values : []} selected={selected}
-          onSelect={setSelected} pageStarts={source.page_starts} />
-          : <p className="microcopy">Loading document…</p>}
+        {documentError ? <div className="notice error" role="alert"><AlertCircle size={16} /><span>{documentError}</span>
+          <button aria-label="Retry loading the document" title="Retry" onClick={() => setReload(count => count + 1)}>
+            <RefreshCw size={14} /></button></div>
+          : shown ? <ValueHighlighter text={shown.text} values={result?.status === "done" ? result.values : []} selected={selected}
+            onSelect={setSelected} pageStarts={shown.page_starts} />
+            : <p className="microcopy">Loading document…</p>}
       </div>
       <div className="run-record">
         {result && result.status === "done" && <>

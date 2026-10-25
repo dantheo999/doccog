@@ -9,14 +9,16 @@ from app.cognition import CognitionError, extract_document, generate_recipe
 from app.documents import ParsedDocument
 from app.grounding import normalise
 from app.models import ExtractionItem, ExtractionOptions, Recipe
-from app.results import Leaf, Usage
-from app.schema import ExtractionSchema, FieldType, SchemaField, TYPE_LABELS, coerce_scalar, parse_date
+from app.results import Leaf, Usage, plain
+from app.schema import ExtractionSchema, FieldType, SchemaField, TYPE_LABELS, coerce_scalar, is_empty, parse_date
 from app.schema_suggest import build_draft, snake_name, unique_name
 from app.settings import load_settings
 from app.solutions.base import Outcome, RunContext, SettingSpec, Solution, SuggestionOutcome
 
 
 SEPARATOR = "__"
+# LangExtract reads any key ending in this suffix as the attributes of another class.
+ATTRIBUTE_SUFFIX = "_attributes"
 
 
 @dataclass
@@ -38,8 +40,9 @@ PRIMARY_NAMES = ("name", "title", "description", "action", "decision", "obligati
                  "text", "subject", "label", "item")
 
 
-def _primary(field: SchemaField) -> SchemaField:
-    """The child whose literal span best identifies an item; it becomes extraction_text."""
+def _primary(field: SchemaField) -> SchemaField | None:
+    """The single-value child whose literal span best identifies an item; it becomes extraction_text.
+    None when there is no such child (the item is then identified by a short phrase)."""
     leaves = [child for child in field.fields if child.type in ("verbatim", "text") and not child.array]
     for wanted in PRIMARY_NAMES:
         for child in leaves:
@@ -48,7 +51,14 @@ def _primary(field: SchemaField) -> SchemaField:
     if leaves:
         return next((child for child in leaves if child.type == "verbatim"), leaves[0])
     scalars = [child for child in field.fields if child.type != "object" and not child.array]
-    return scalars[0] if scalars else field.fields[0]
+    return scalars[0] if scalars else None
+
+
+def class_name(path: list[str]) -> str:
+    """The class for a field path. A name ending in the attribute suffix would not parse, so it gets a
+    "__1" suffix (no child field can be named "1", so it is not the class of a nested field)."""
+    name = SEPARATOR.join(path)
+    return f"{name}{SEPARATOR}1" if name.endswith(ATTRIBUTE_SUFFIX) else name
 
 
 def class_plan(fields: list[SchemaField], path: list[str] | None = None,
@@ -60,11 +70,9 @@ def class_plan(fields: list[SchemaField], path: list[str] | None = None,
     specs: list[ClassSpec] = []
     for field in fields:
         current = path + [field.name]
-        name = SEPARATOR.join(current)
+        name = class_name(current)
         if field.type == "object":
             primary = _primary(field)
-            if primary.type == "object":
-                primary = None
             attributes = [child for child in field.fields if child is not primary
                           and child.type != "object" and (not child.array or child.type in ("enum", "boolean"))]
             specs.append(ClassSpec(name, current, field, primary, attributes, parent))
@@ -97,10 +105,12 @@ def class_guide(schema: ExtractionSchema | list[SchemaField]) -> str:
         parent_rule = (f' attribute "parent" = the exact extraction_text of the {spec.parent} item it belongs to;'
                        if spec.parent else "")
         if spec.is_object:
-            subject = spec.text_field.name if spec.text_field else "a short identifying phrase"
-            line = (f"- {spec.name}: one extraction per {'item' if spec.field.array else 'occurrence'}"
+            subject = f"the {spec.text_field.name}" if spec.text_field else "a short identifying phrase"
+            many = ("one extraction per item" if spec.field.array
+                    else "at most one extraction" + (f" per {spec.parent} item" if spec.parent else ""))
+            line = (f"- {spec.name}: {many}"
                     f"{' (' + spec.field.description + ')' if spec.field.description else ''}; "
-                    f"extraction_text = the {subject}"
+                    f"extraction_text = {subject}"
                     f"{' (' + spec.text_field.description.rstrip('.') + ')' if spec.text_field and spec.text_field.description else ''};"
                     f"{parent_rule}")
             if spec.attributes:
@@ -120,11 +130,15 @@ def _key(text: str) -> str:
     return normalise(text)[0].strip()
 
 
-def _leaf(field: SchemaField, item: ExtractionItem, from_attribute: str | None = None) -> Leaf:
+def _leaf(field: SchemaField, item: ExtractionItem, from_attribute: str | None = None,
+          normalised: bool = True) -> Leaf:
+    """A value from a finding: an attribute, or extraction_text (or its normalised "value" attribute,
+    unless "value" is another field's attribute)."""
     attributes = item.attributes or {}
     if from_attribute is not None:
         return Leaf(coerce_scalar(attributes.get(from_attribute), field))
-    raw = attributes.get("value") if field.type not in ("text", "verbatim") and "value" in attributes else item.extraction_text
+    raw = (attributes.get("value") if normalised and field.type not in ("text", "verbatim") and "value" in attributes
+           else item.extraction_text)
     return Leaf(coerce_scalar(raw, field), quote=item.extraction_text, start=item.start, end=item.end)
 
 
@@ -158,26 +172,35 @@ def assemble(fields: list[SchemaField], items: list[ExtractionItem]) -> tuple[di
                 return parents[-1][1]
             preceding = [entry for entry in parents if entry[0] <= position]
             return (preceding[-1] if preceding else parents[0])[1]
-        holder = empty_item(parent_spec)
-        attach(parent_spec, holder, item.start or 0)
+        holder = attach(parent_spec, empty_item(parent_spec), item.start or 0)
         notes.append(f"Created an unnamed {spec.parent} item to hold {spec.name} findings.")
         return holder
 
-    def attach(spec: ClassSpec, value, start: int):
+    def place(spec: ClassSpec, container: dict, record: dict, start: int) -> dict:
+        """Add an object record to its container. A repeat of a single-value object fills the gaps of
+        the first one, and later findings that belong to it (by position) attach to that first one."""
+        name = spec.path[-1]
+        if spec.field.array:
+            if not isinstance(container.get(name), list):
+                container[name] = []
+            container[name].append(record)
+        elif isinstance(container.get(name), dict):
+            existing = container[name]
+            for key, value in record.items():
+                if is_empty(plain(existing.get(key))) and not is_empty(plain(value)):
+                    existing[key] = value
+            notes.append(f"Merged repeated {spec.name} findings into one item (the schema allows one).")
+            record = existing
+        else:
+            container[name] = record
+        containers[spec.name].append((start, record))
+        return record
+
+    def attach(spec: ClassSpec, record: dict, start: int) -> dict:
         container = target(spec, ExtractionItem(id="", extraction_class=spec.name, extraction_text="",
                                                 attributes={}, start=start, end=None, alignment_status=None,
                                                 grounding="ungrounded")) if spec.parent else root
-        name = spec.path[-1]
-        if spec.field.array:
-            container.setdefault(name, [])
-            if not isinstance(container[name], list):
-                container[name] = []
-            container[name].append(value)
-        elif name not in container or container[name] in (None, []) or (
-                isinstance(container[name], Leaf) and container[name].value is None):
-            container[name] = value
-        if spec.is_object:
-            containers[spec.name].append((start, value))
+        return place(spec, container, record, start)
 
     ordered = sorted(items, key=lambda item: (item.start if item.start is not None else 10**9))
     for item in ordered:
@@ -189,7 +212,8 @@ def assemble(fields: list[SchemaField], items: list[ExtractionItem]) -> tuple[di
         if spec.is_object:
             record = empty_item(spec)
             if spec.text_field is not None:
-                record[spec.text_field.name] = _leaf(spec.text_field, item)
+                record[spec.text_field.name] = _leaf(
+                    spec.text_field, item, normalised=all(child.name != "value" for child in spec.attributes))
             for child in spec.attributes:
                 raw = (item.attributes or {}).get(child.name)
                 if child.array:
@@ -198,17 +222,7 @@ def assemble(fields: list[SchemaField], items: list[ExtractionItem]) -> tuple[di
                     record[child.name] = [Leaf(coerce_scalar(value, single)) for value in values]
                 else:
                     record[child.name] = _leaf(child, item, from_attribute=child.name)
-            if spec.parent is None:
-                attach(spec, record, start)
-            else:
-                container = target(spec, item)
-                name = spec.path[-1]
-                if spec.field.array:
-                    container.setdefault(name, [])
-                    container[name].append(record)
-                elif container.get(name) is None:
-                    container[name] = record
-                containers[spec.name].append((start, record))
+            place(spec, root if spec.parent is None else target(spec, item), record, start)
         else:
             leaf = _leaf(spec.field.model_copy(update={"array": False}), item)
             if leaf.value is None:

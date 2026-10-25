@@ -4,8 +4,8 @@ import os
 from app import nuextract_engine as engine
 from app.azure import ServiceError
 from app.documents import DocumentError, ParsedDocument
-from app.results import Leaf, Usage, annotate_plain, merge_annotated
-from app.schema import ExtractionSchema
+from app.results import Leaf, Usage, merge_annotated, plain
+from app.schema import ExtractionSchema, SchemaField, coerce_scalar, is_empty
 from app.schema_suggest import build_draft, merge_field_lists, sanitise_fields
 from app.solutions.base import Outcome, RunContext, SettingSpec, Solution, SuggestionOutcome
 from app.text_chunks import chunk_text
@@ -23,21 +23,23 @@ def engine_settings() -> engine.NuExtractSettings:
 ERROR_STATUS = {"invalid_input": 422, "context_length": 413, "timeout": 504, "connection": 503, "unavailable": 503}
 
 
-def attach_confidences(record: dict, confidences: dict[tuple, float], offset: tuple = ()) -> dict:
-    """Copy per-leaf logprob confidences (keyed by JSON path) onto Leaf objects."""
-    def visit(value, path):
-        if isinstance(value, Leaf):
-            confidence = confidences.get(path)
-            if confidence is not None:
-                value.confidence = confidence
-        elif isinstance(value, list):
-            for index, item in enumerate(value):
-                visit(item, path + (index,))
-        elif isinstance(value, dict):
-            for key, item in value.items():
-                visit(item, path + (key,))
-    visit(record, offset)
-    return record
+def annotate_with_confidences(data, fields: list[SchemaField], confidences: dict[tuple, float]) -> dict:
+    """Shape the model's answer to the schema (as annotate_plain does) with each value's logprob
+    confidence, looked up by its JSON path in the raw answer: empty list items are dropped only
+    afterwards, so they do not shift the indices of the items after them."""
+    def wrap(value, field, path, array):
+        if array:
+            items = value if isinstance(value, list) else ([] if value is None else [value])
+            wrapped = [wrap(item, field, path + (index,) if isinstance(value, list) else path, False)
+                       for index, item in enumerate(items)]
+            return [item for item in wrapped if not is_empty(plain(item))]
+        if field.type == "object":
+            source = value if isinstance(value, dict) else {}
+            return {child.name: wrap(source.get(child.name), child, path + (child.name,), child.array)
+                    for child in field.fields}
+        return Leaf(coerce_scalar(value, field), confidence=confidences.get(path))
+    source = data if isinstance(data, dict) else {}
+    return {field.name: wrap(source.get(field.name), field, (field.name,), field.array) for field in fields}
 
 
 class NuExtractSolution(Solution):
@@ -199,8 +201,7 @@ class NuExtractSolution(Solution):
                                         completion_tokens=output.usage.get("completion_tokens", 0)))
                 if output.data is None:
                     raise ServiceError("NuExtract returned output that is not valid JSON.")
-                record = annotate_plain(output.data, schema.fields)
-                records.append(attach_confidences(record, output.confidences))
+                records.append(annotate_with_confidences(output.data, schema.fields, output.confidences or {}))
                 raws.append({"answer": output.raw, "reasoning": output.reasoning,
                              "finish_reason": output.finish_reason, "elapsed_seconds": output.elapsed_seconds})
                 if not output.confidences:

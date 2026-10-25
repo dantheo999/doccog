@@ -261,3 +261,22 @@ it("exports the field matrix as CSV", async () => {
     URL.revokeObjectURL = original.revoke;
   }
 });
+
+it("marks a value whose shape changed between schema versions as not compared", async () => {
+  const base = fetchMock.getMockImplementation()!;
+  fetchMock.mockImplementation(async (input: string, init?: RequestInit) => {
+    if (input !== "/api/compare") return base(input, init);
+    const result = comparison(["run-a", "run-b"], null);
+    const chair = result.cells.find(cell => cell.document_id === "doc-1" && cell.field === "chair")!;
+    delete chair.values["run-b"];
+    chair.agreement = { "run-a": null };
+    chair.incomparable = ["run-b"];
+    return Response.json(result);
+  });
+  window.location.hash = "#/compare?runs=run-a,run-b&doc=doc-1";
+  render(<ComparePage />);
+  const drill = await screen.findByRole("table", { name: "Values in Minutes A" });
+  const chair = within(drill).getByRole("row", { name: /^chair/ });
+  expect(within(chair).getByText("different shape")).toBeInTheDocument();
+  expect(within(chair).queryByText("no record")).not.toBeInTheDocument();
+});

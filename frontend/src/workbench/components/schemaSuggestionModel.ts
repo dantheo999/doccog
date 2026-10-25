@@ -1,5 +1,5 @@
 /** Pure helpers for schema suggestions: shared constants, stats, settings storage and the field-path comparison. */
-import type { SchemaDraft, SchemaField, SchemaSuggestion, SettingSpec, SharedSuggestionResult, SolutionInfo, Usage } from "../types";
+import type { FieldType, SchemaDraft, SchemaField, SchemaSuggestion, SettingSpec, SharedSuggestionResult, SolutionInfo, Usage } from "../types";
 import { defaults, storedValueFits } from "./SettingsForm";
 
 /** The solution id the backend stores the shared, solution-neutral suggestion under. */
@@ -141,8 +141,28 @@ export function storeWorkspaceDraft(draft: SchemaDraft): boolean {
 export function loadWorkspaceDraft(): SchemaDraft | null {
   try {
     const value = JSON.parse(localStorage.getItem(SCHEMA_DRAFT_KEY) ?? "null");
-    return value && typeof value === "object" && Array.isArray(value.fields) ? value as SchemaDraft : null;
+    return value && typeof value === "object" && Array.isArray(value.fields) ? normaliseDraft(value) : null;
   } catch { return null; }
+}
+
+const record = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+
+/** A well-formed draft from hand-written or stored JSON: every field gets a name, a known type, a
+ * description and options/children lists, so the editor and its checks can rely on them. */
+export function normaliseDraft(value: unknown, fallbackName = "Imported schema"): SchemaDraft {
+  const fields = (items: unknown): SchemaField[] => (Array.isArray(items) ? items : []).map(item => {
+    const raw = record(item);
+    const type: FieldType = typeof raw.type === "string" && raw.type in TYPE_LABELS ? raw.type as FieldType : "text";
+    return {
+      name: String(raw.name ?? ""), type, description: typeof raw.description === "string" ? raw.description : "",
+      array: !!raw.array, options: type === "enum" && Array.isArray(raw.options) ? raw.options.map(String) : [],
+      fields: type === "object" ? fields(raw.fields) : [],
+    };
+  });
+  const source = record(value);
+  return { name: typeof source.name === "string" ? source.name : fallbackName,
+    description: typeof source.description === "string" ? source.description : "", fields: fields(source.fields) };
 }
 
 // --- Comparison -------------------------------------------------------------------------------

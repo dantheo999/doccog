@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCheck, Download, FileText, FolderOpen, LoaderCircle, Save, Sparkles, Upload, Wand2, X } from "lucide-react";
 import { message, workbench } from "../api";
-import type { Collection, SchemaDraft, SchemaSuggestion, SolutionInfo, StoredDocument } from "../types";
+import type { Collection, SchemaDraft, SchemaSuggestion, SchemaSummary, SolutionInfo, StoredDocument } from "../types";
 import { useWorkspace } from "../workspace";
 import SchemaEditor, { schemaErrors } from "../components/SchemaEditor";
 import { SuggestWithPicker, SuggestionsSection } from "../components/SchemaSuggestions";
 import type { SuggestJob } from "../components/SchemaSuggestions";
 import { settingsErrors } from "../components/SettingsForm";
 import {
-  MAX_GUIDANCE, SCHEMA_DRAFT_KEY, SHARED_ID, loadSuggestionSettings, loadWorkspaceDraft, sameDraft, sharedSuggestion,
+  MAX_GUIDANCE, SCHEMA_DRAFT_KEY, SHARED_ID, loadSuggestionSettings, loadWorkspaceDraft, normaliseDraft, sameDraft, sharedSuggestion,
   storeSuggestionSettings, suggestionSpecs, suggestionsFor,
 } from "../components/schemaSuggestionModel";
 import { downloadJson } from "../../recipe";
@@ -36,7 +36,8 @@ export default function WorkspacePage() {
   const [reveal, setReveal] = useState<{ count: number; focus: boolean }>({ count: 0, focus: false });
   const [guidance, setGuidance] = useState("");
   const [effort, setEffort] = useState("medium");
-  const [busy, setBusy] = useState<"save" | null>(null);
+  const [busy, setBusy] = useState<"save" | "save-new" | null>(null);
+  const [schemas, setSchemas] = useState<SchemaSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   // Suggestion methods: the shared one (default) plus any solutions that can suggest; each runs as its own job.
@@ -47,9 +48,14 @@ export default function WorkspacePage() {
   const [suggestions, setSuggestions] = useState<SchemaSuggestion[]>([]);
   const [compare, setCompare] = useState<string[]>([]);
   const listRequest = useRef(0);
+  /** Latest preview / document-set request: a slower earlier response must not replace a later one. */
+  const previewRequest = useRef(0);
+  const collectionRequest = useRef(0);
   const collection = workspace.collection;
 
   useEffect(() => { workbench.collections().then(setCollections).catch(() => setCollections([])); }, [collection?.id]);
+  const loadSchemas = useCallback(() => workbench.schemas().then(setSchemas).catch(() => setSchemas([])), []);
+  useEffect(() => { void loadSchemas(); }, [loadSchemas]);
   useEffect(() => {
     if (!draft && workspace.schema) setDraft({ name: workspace.schema.name, description: workspace.schema.description, fields: workspace.schema.fields });
   }, [workspace.schema, draft]);
@@ -113,12 +119,22 @@ export default function WorkspacePage() {
   }
 
   async function switchCollection(id: string) {
-    try { workspace.setCollection(await workbench.collection(id)); setExemplars([]); }
-    catch (failure) { setError(message(failure)); }
+    if (!id) return;
+    const request = ++collectionRequest.current;
+    try {
+      const next = await workbench.collection(id);
+      if (request !== collectionRequest.current) return;
+      workspace.setCollection(next);
+      setExemplars([]);
+    } catch (failure) { if (request === collectionRequest.current) setError(message(failure)); }
   }
 
   async function openPreview(id: string) {
-    try { setPreview(await workbench.document(id)); } catch (failure) { setError(message(failure)); }
+    const request = ++previewRequest.current;
+    try {
+      const next = await workbench.document(id);
+      if (request === previewRequest.current) setPreview(next);
+    } catch (failure) { if (request === previewRequest.current) setError(message(failure)); }
   }
 
   const capable = useMemo(() => new Set(solutions.filter(item => item.schema_suggestion?.supported && item.status.ready)
@@ -206,24 +222,45 @@ export default function WorkspacePage() {
     } catch (failure) { setError(message(failure)); }
   }
 
-  async function save() {
+  /** Save the draft as the next version of the agreed schema, or (asNew) as a separate schema. */
+  async function save(asNew = false) {
     if (!draft) return;
-    setBusy("save");
+    setBusy(asNew ? "save-new" : "save");
     setError(null);
     try {
       const exemplarNames = collection?.documents.filter(item => exemplars.includes(item.id)).map(item => item.name);
-      const schema = await workbench.saveSchema(draft, workspace.schema?.id ?? null, exemplarNames?.length ? exemplarNames : undefined);
+      const schema = await workbench.saveSchema(draft, asNew ? null : workspace.schema?.id ?? null,
+        exemplarNames?.length ? exemplarNames : undefined);
       workspace.setSchema(schema);
+      // The backend tidies the draft (e.g. trims the name); keep the editor in step so it is not "unsaved".
+      setDraft({ name: schema.name, description: schema.description, fields: schema.fields });
       setSaved(`Saved “${schema.name}” as version ${schema.version}. All solutions now extract against it.`);
+      void loadSchemas();
     } catch (failure) { setError(message(failure)); }
     finally { setBusy(null); }
+  }
+
+  /** Make a saved schema the agreed one and load it into the editor. */
+  async function pickSchema(id: string) {
+    if (!id || id === workspace.schema?.id) return;
+    if (dirty && !window.confirm("Load this saved schema? Unsaved changes to the current draft will be lost.")) return;
+    setError(null);
+    try {
+      const schema = await workbench.schema(id);
+      workspace.setSchema(schema);
+      setDraft({ name: schema.name, description: schema.description, fields: schema.fields });
+      setNotes([]);
+      setNotesSource(null);
+      setSaved(null);
+    } catch (failure) { setError(message(failure)); }
   }
 
   async function importSchema(file: File | undefined) {
     if (!file) return;
     try {
       const value = JSON.parse(await file.text());
-      setDraft({ name: value.name ?? "Imported schema", description: value.description ?? "", fields: value.fields ?? [] });
+      if (!value || typeof value !== "object" || !Array.isArray(value.fields)) throw new Error("it has no \"fields\" list.");
+      setDraft(normaliseDraft(value));
       setNotes([]);
       setNotesSource(null);
     } catch (failure) { setError(`Could not read the schema file: ${message(failure)}`); }
@@ -233,6 +270,10 @@ export default function WorkspacePage() {
   const dirty = !!draft && (!workspace.schema || JSON.stringify({ name: draft.name, description: draft.description, fields: draft.fields })
     !== JSON.stringify({ name: workspace.schema.name, description: workspace.schema.description, fields: workspace.schema.fields }));
   const processing = !!progress && progress.done < progress.total;
+  const schemaOptions = useMemo(() => workspace.schema && !schemas.some(item => item.id === workspace.schema!.id)
+    ? [{ id: workspace.schema.id, name: workspace.schema.name, version: workspace.schema.version,
+      created_at: workspace.schema.created_at, fields: workspace.schema.fields.length }, ...schemas] : schemas,
+  [schemas, workspace.schema]);
   const documentIds = useMemo(() => collection?.documents.map(item => item.id) ?? [], [collection]);
   const visibleSuggestions = useMemo(() => suggestionsFor(suggestions, documentIds), [suggestions, documentIds]);
 
@@ -253,7 +294,7 @@ export default function WorkspacePage() {
           }} onChange={event => { void processFolder(event.target.files); event.target.value = ""; }} />
         </div>
         <p className="microcopy">Try <b>samples/</b> for a quick check or <b>documents/</b> (20 meeting minutes) for full runs.</p>
-        {collections.length > 1 && <label className="inline-select"><span>Document set</span>
+        {(collections.length > 1 || (!collection && collections.length > 0)) && <label className="inline-select"><span>Document set</span>
           <select value={collection?.id ?? ""} onChange={event => void switchCollection(event.target.value)}>
             {!collection && <option value="">Choose…</option>}
             {collections.map(item => <option key={item.id} value={item.id}>{item.name} · {item.documents} docs · {new Date(item.created_at).toLocaleDateString()}</option>)}
@@ -315,6 +356,11 @@ export default function WorkspacePage() {
 
         <section className="panel workspace-schema" aria-labelledby="schema-heading" ref={schemaPanel}>
           <div className="panel-title"><h2 id="schema-heading" tabIndex={-1}>Agreed schema</h2>
+            {schemaOptions.length > 0 && <select aria-label="Saved schema" title="Choose a saved schema"
+              value={workspace.schema?.id ?? ""} onChange={event => void pickSchema(event.target.value)}>
+              {!workspace.schema && <option value="">Choose a saved schema…</option>}
+              {schemaOptions.map(item => <option key={item.id} value={item.id}>{item.name} · v{item.version} · {item.fields} fields</option>)}
+            </select>}
             {workspace.schema && <span className="pill success">v{workspace.schema.version} · {workspace.schema.fields.length} fields</span>}
             <span className="spacer" />
             <button className="icon-button" title="Import schema JSON" aria-label="Import schema JSON" onClick={() => importInput.current?.click()}><Upload size={14} /></button>
@@ -333,6 +379,9 @@ export default function WorkspacePage() {
               <button className="primary" onClick={() => void save()} disabled={!!errors.length || busy !== null || !dirty}>
                 {busy === "save" ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}
                 {workspace.schema ? (dirty ? "Save as new version" : "Saved") : "Save as agreed schema"}</button>
+              {workspace.schema && <button className="secondary" onClick={() => void save(true)} disabled={!!errors.length || busy !== null}
+                title="Save the draft as a separate schema (for example for another document type), not as a version of this one">
+                {busy === "save-new" ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}Save as new schema</button>}
               {saved && <span className="microcopy success">{saved}</span>}
               {dirty && workspace.schema && <span className="microcopy">Unsaved changes; runs use the saved version.</span>}
             </div>

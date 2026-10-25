@@ -67,7 +67,7 @@ class JsonFiles:
                 value = self._memory.get(key)
                 return json.loads(json.dumps(value)) if value is not None else None
             try:
-                return json.loads((self.root / f"{key}.json").read_text())
+                return json.loads((self.root / f"{key}.json").read_bytes())
             except FileNotFoundError:
                 return None
 

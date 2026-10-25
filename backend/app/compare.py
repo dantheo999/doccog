@@ -101,6 +101,18 @@ def value_similarity(a: JsonValue, b: JsonValue, field: SchemaField) -> float:
     return scalar_similarity(a, b, field)
 
 
+def conforms(value: JsonValue, field: SchemaField, array: bool | None = None) -> bool:
+    """Whether a value has the field's shape (a list for arrays, a dict for objects, else a scalar),
+    recursively. Runs of another schema version may hold a field under the same name in another shape."""
+    if value is None:
+        return True
+    if field.array if array is None else array:
+        return isinstance(value, list) and all(conforms(item, field, False) for item in value)
+    if field.type == "object":
+        return isinstance(value, dict) and all(conforms(value.get(child.name), child) for child in field.fields)
+    return not isinstance(value, (list, dict))
+
+
 def _display(value: JsonValue, field: SchemaField) -> str:
     if is_empty(value):
         return ""
@@ -162,6 +174,7 @@ def compare_runs(runs: list[Run], reference_id: str | None = None) -> dict:
                                                         "name": document.document_name, "status": {}})
             documents[document.document_id]["status"][run.id] = document.status
     by_run = {run.id: {document.document_id: document for document in run.documents} for run in runs}
+    reshaped: dict[str, dict[str, str]] = {}  # field -> run id -> label, for values of another shape
 
     cells = []
     for document_id in documents:
@@ -173,6 +186,10 @@ def compare_runs(runs: list[Run], reference_id: str | None = None) -> dict:
                 if result is None or result.status != "done" or result.data is None:
                     continue
                 value = result.data.get(field.name)
+                if not conforms(value, field):
+                    reshaped.setdefault(field.name, {})[run.id] = f"{run.label} (v{run.extraction_schema.version})"
+                    entry.setdefault("incomparable", []).append(run.id)
+                    continue
                 present[run.id] = value
                 entry["values"][run.id] = {"value": value, "display": _display(value, field),
                                            "count": len(value) if field.array and isinstance(value, list) else None,
@@ -190,6 +207,9 @@ def compare_runs(runs: list[Run], reference_id: str | None = None) -> dict:
                     entry["pivot"] = pivot
                     entry["rows"] = aligned_rows(field, {key: list(value or []) for key, value in present.items()}, pivot)
             cells.append(entry)
+    for name, labels in reshaped.items():
+        warnings.append(f"“{name}” has a different shape in {', '.join(labels.values())}; "
+                        "those values are not compared.")
 
     run_stats = []
     for run in runs:

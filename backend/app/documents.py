@@ -212,7 +212,7 @@ class DocumentStore:
             document = self._cache.get(document_id)
             if document is None and self.root is not None:
                 try:
-                    data = json.loads(self._path(document_id, "json").read_text())
+                    data = json.loads(self._path(document_id, "json").read_bytes())
                     document = ParsedDocument(**data)
                 except FileNotFoundError:
                     document = None

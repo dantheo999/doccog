@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { FileStack, GitCompareArrows, House, ScanText, Shapes } from "lucide-react";
+import { FileStack, GitCompareArrows, House, RefreshCw, ScanText, Shapes } from "lucide-react";
 import { message, workbench } from "./workbench/api";
 import { href, useRoute } from "./workbench/router";
 import type { SolutionInfo } from "./workbench/types";
@@ -41,6 +41,9 @@ function Shell() {
   else if (route.path === "/compare") page = <ComparePage />;
   else if (appId && solution) page = <SolutionPage key={solution.id} solution={solution} onRefresh={loadSolutions} />;
   else if (appId && !solutions && !error) page = <div className="wb-page"><p className="microcopy">Loading…</p></div>;
+  else if (appId && !solutions) page = <div className="wb-page">
+    <div className="notice error" role="alert"><span>Could not load the solutions: {error}</span></div>
+    <button className="secondary" onClick={loadSolutions}><RefreshCw size={14} />Retry</button></div>;
   else page = <div className="wb-page"><div className="wb-empty"><h2>Page not found</h2>
     <p>{appId ? `No solution called “${appId}” is registered.` : "Unknown page."}</p><a className="secondary" href="#/">Back to apps</a></div></div>;
 

@@ -126,3 +126,19 @@ def test_pdf_records_page_offsets():
     parsed = parse_document("two.pdf", buffer.getvalue())
     assert parsed.text == "First page\n\nSecond page"
     assert parsed.page_starts == [0, 12]
+
+
+def test_disk_stores_read_back_utf8_under_a_non_utf8_locale(tmp_path, monkeypatch):
+    """Windows defaults to cp1252: stored JSON must be decoded as UTF-8 regardless of the locale."""
+    from pathlib import Path
+    from app.storage import JsonFiles
+
+    original = Path.read_text
+    monkeypatch.setattr(Path, "read_text", lambda self, encoding=None, errors=None, **kwargs:
+                        original(self, encoding=encoding or "cp1252", errors=errors, **kwargs))
+    files = JsonFiles(tmp_path, "runs")
+    files.write("r1", {"label": "Direct LLM · 2 docs", "quote": "“Approved” ●"})
+    assert JsonFiles(tmp_path, "runs").read("r1") == {"label": "Direct LLM · 2 docs",
+                                                     "quote": "“Approved” ●"}
+    stored = DocumentStore(tmp_path).add(parse_document("q.txt", "The “Board” ● agreed.".encode()))
+    assert DocumentStore(tmp_path).get(stored.id).text == "The “Board” ● agreed."

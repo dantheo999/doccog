@@ -616,3 +616,23 @@ def test_template_round_trips_with_schema_to_template():
     for f in plain:
         f["fields"] = [{**c, "description": ""} for c in f.get("fields", [])]
     assert ne.schema_to_template(ne.template_to_fields(ne.schema_to_template(plain))) == ne.schema_to_template(plain)
+
+
+def test_confidences_follow_raw_indices_when_empty_items_are_dropped():
+    from app.schema import SchemaField
+    from app.solutions.nuextract import annotate_with_confidences
+    fields = [SchemaField.model_validate(field) for field in MINUTES]
+    answer = ('{"attendees": [{"name": null, "role": null}, {"name": "Alice Smith", "role": "Chair"}], '
+              '"decisions": ["", "Approve the budget"], "topics": "finance", "budget": "£1.5 million"}')
+    data, _, spans = ne.parse_json_with_spans(answer, 0)
+    assert ("attendees", 0, "name") in spans and ("decisions", 0) in spans
+    confidences = {("attendees", 0, "name"): 0.99, ("attendees", 1, "name"): 0.31, ("attendees", 1, "role"): 0.5,
+                   ("decisions", 0): 0.97, ("decisions", 1): 0.20, ("topics",): 0.8, ("budget",): 0.6}
+    record = annotate_with_confidences(data, fields, confidences)
+    assert [(item["name"].value, item["name"].confidence) for item in record["attendees"]] == [("Alice Smith", 0.31)]
+    assert [(leaf.value, leaf.confidence) for leaf in record["decisions"]] == [("Approve the budget", 0.20)]
+    assert [(leaf.value, leaf.confidence) for leaf in record["topics"]] == [("finance", 0.8)]
+    assert (record["budget"].value, record["budget"].confidence) == (1_500_000, 0.6)
+    assert record["venue"]["room"].value is None and record["venue"]["room"].confidence is None
+    from app.results import annotate_plain, plain
+    assert plain(record) == plain(annotate_plain(data, fields))

@@ -16,13 +16,15 @@ interface Props {
   pageStarts?: number[];
 }
 
+const NO_PAGES: number[] = [];
+
 /** Source text with every grounded value highlighted; clicks cycle overlapping values. */
-export default function ValueHighlighter({ text, values, selected, onSelect, pageStarts = [] }: Props) {
+export default function ValueHighlighter({ text, values, selected, onSelect, pageStarts = NO_PAGES }: Props) {
   const reader = useRef<HTMLDivElement>(null);
   const spans = useMemo(() => values.map(value => ({ id: pathKey(value.path), start: value.start, end: value.end })),
     [values]);
   const byKey = useMemo(() => new Map(values.map(value => [pathKey(value.path), value])), [values]);
-  const segments = useMemo(() => buildSegments(text, spans), [text, spans]);
+  const segments = useMemo(() => buildSegments(text, spans, pageStarts), [text, spans, pageStarts]);
   const pageOffsets = useMemo(() => new Set(pageStarts.slice(1)), [pageStarts]);
 
   useEffect(() => {

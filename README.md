@@ -34,8 +34,8 @@ local Unstract platform uses 8080 and 8000). Compose starts three services:
 - `backend` – FastAPI; persists processed documents, schemas and runs in the
   `workbench-data` volume.
 - `frontend` – the React app behind Nginx (same-origin `/api` proxy).
-- `nuextract` – llama.cpp serving NuExtract3 on CPU. **The first start downloads the
-  ~2.7 GB Q4_K_M GGUF** into the `nuextract-models` volume, so NuExtract shows
+- `nuextract` – llama.cpp serving NuExtract3 on CPU. **The first start downloads
+  ~3.5 GB (Q4_K_M GGUF + vision projector)** into the `nuextract-models` volume, so NuExtract shows
   "Not ready" for a few minutes. Skip it with `docker compose up -d backend frontend`.
 
 Set these values in `.env` for the Azure-based solutions and schema suggestion:
@@ -76,7 +76,10 @@ npm run dev        # http://127.0.0.1:5173, proxies /api to 127.0.0.1:8010
 The dev API uses port **8010** (set `DOCCOG_API` to proxy elsewhere) so it does not
 clash with Unstract's backend on 8000. Data persists in `data/` at the repository
 root (`DOCCOG_DATA_DIR` overrides it). For NuExtract3 outside Docker, run a
-llama.cpp server and set `NUEXTRACT_BASE_URL` (see [NuExtract3](#nuextract3)).
+llama.cpp server and set `NUEXTRACT_BASE_URL` in the shell that runs uvicorn (see
+[NuExtract3](#nuextract3)); the backend does not read `.env`, which only Docker Compose uses.
+The API answers only requests addressed to `localhost`, `127.0.0.1` or `[::1]`; to reach it
+under another host name, list it in `DOCCOG_ALLOWED_HOSTS` (comma-separated).
 
 ## Testing it locally (step by step)
 
@@ -110,7 +113,8 @@ work through all 20 documents on CPU):
 3. **Full test with `documents/` (20 meeting minutes).**
    - Workspace → **Choose folder** → `documents`. Tick 2–3 varied exemplars (for example
      `20191022_RSH_Board_Minutes.pdf`, `191017_ARAC_Minutes.pdf`, `CSPL_Thursday_17_October_2019_minutes.pdf`),
-     suggest, edit and save a schema — or load the **Meeting-minutes starter**.
+     suggest, edit and save a schema — or load the **Meeting-minutes starter**. Use **Save as new
+     schema** here, so the minutes schema does not become a new version of the samples schema.
    - Run **Direct LLM** (about 2–3 minutes for all 20 at 4 in parallel) and **LangExtract**
      (generate a recipe from 2 exemplars first; about 2 minutes for all 20).
    - Run **NuExtract3** on a few documents first; all 20 can take an hour or more on CPU.
@@ -139,7 +143,9 @@ and llama.cpp as in [NuExtract3](#nuextract3); everything else is the same at <h
    it (see [Schema suggestions](#schema-suggestions)) and compare the suggestions side
    by side. Edit fields in the tree editor (or start from the meeting-minutes starter,
    or import JSON) and **Save**. Saving a change creates a new schema version; runs
-   record the version they used.
+   record the version they used. **Save as new schema** starts a separate schema (for
+   another document type), and the **Saved schema** list switches the agreed schema to
+   any schema saved earlier, also in a fresh browser.
 3. **Run solutions.** Each solution page shows a checklist (documents, schema,
    solution readiness), its settings, **What gets sent** (the exact prompt,
    template or class guide derived from the schema) and a run launcher. Runs execute
@@ -413,7 +419,9 @@ pick the run you have reviewed most carefully as the reference.
 - Credentials are backend environment variables only; `.env` is ignored by Git and
   excluded from Docker build contexts. No key is returned by the API.
 - The workbench is published only on `127.0.0.1`; the backend and NuExtract have no
-  published host ports. This is a trusted, single-user local prototype, not an
+  published host ports. Nginx and the API also reject requests for any other host
+  name, so a web page that rebinds its own DNS name to `127.0.0.1` cannot read your
+  documents or start runs. This is a trusted, single-user local prototype, not an
   authenticated production service.
 
 Uploads are limited to 20 MiB, PDFs to 1,000 pages, extracted text to 500,000
@@ -447,8 +455,10 @@ npm run build
 Tests need no credentials or model servers: they cover parsing, the schema model,
 grounding, record building and merging, the LangExtract schema mapping, the
 comparison engine, the job runner and API, each solution's request/response
-handling with mocked transports, and the React pages. API docs are served at
-`/api/docs`.
+handling with mocked transports, and the React pages. API docs are served by the
+backend at `/api/docs`; open them on the dev API (<http://127.0.0.1:8010/api/docs>). In
+Docker, Nginx's Content-Security-Policy blocks the Swagger UI's CDN assets, so that page
+stays blank there; the schema itself is at `/api/openapi.json`.
 
 | Path | Purpose |
 | --- | --- |

@@ -7,6 +7,7 @@ import {
 import { message, workbench } from "../api";
 import { href, navigate, useRoute } from "../router";
 import ValueHighlighter, { confidenceLabel, confidenceTone, formatValue, pathKey } from "../components/ValueHighlighter";
+import { toCsv } from "../csv";
 import type {
   CompareCell, CompareCellValue, CompareRow, CompareRunStats, Comparison, FieldValue, Grounding, Run, RunStatus,
   RunSummary, SchemaField, StoredDocument,
@@ -100,12 +101,6 @@ function documentScore(comparison: Comparison, cells: Map<string, CompareCell>, 
   }
   return { agreement: average(scores), filled, total: comparison.fields.length };
 }
-
-const csvCell = (value: unknown) => {
-  const text = value === null || value === undefined ? "" : String(value);
-  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-};
-const toCsv = (rows: unknown[][]) => rows.map(row => row.map(csvCell).join(",")).join("\r\n");
 
 function download(filename: string, type: string, content: string) {
   if (typeof URL.createObjectURL !== "function") return;
@@ -776,8 +771,9 @@ interface ValueCellProps {
 
 function ValueCell({ run, field, cell, status, match, isReference, active, onSource }: ValueCellProps) {
   const value: CompareCellValue | undefined = cell?.values[run.id];
-  if (!value) return <td className="cmp-heat cmp-none">{status === "done"
-    ? <span className="cmp-run-status missing">no record</span> : <StatusChip status={status} />}</td>;
+  if (!value) return <td className="cmp-heat cmp-none">{cell?.incomparable?.includes(run.id)
+    ? <span className="cmp-run-status missing" title="This run's schema version gives the field another shape">different shape</span>
+    : status === "done" ? <span className="cmp-run-status missing">no record</span> : <StatusChip status={status} />}</td>;
   const score = cell?.agreement[run.id];
   const empty = isEmpty(value.value);
   const t = tone(isReference || field.array ? null : score, match);

@@ -189,6 +189,8 @@ export interface CompareCell {
   agreement: Record<string, number | null>;
   pivot?: string;
   rows?: CompareRow[];
+  /** Runs whose value for this field has another shape (a different schema version); not compared. */
+  incomparable?: string[];
 }
 
 export interface FieldScore { filled: number; documents: number; agreement: number | null; agree_count: number; scored: number }

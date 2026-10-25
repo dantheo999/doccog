@@ -456,13 +456,23 @@ class _Spans:
         return (chunk.start + match.start, chunk.start + match.end) if match else None
 
 
+def _overlap(a: tuple[int, int] | None, b: tuple[int, int] | None) -> bool:
+    return bool(a and b) and min(a[1], b[1]) > max(a[0], b[0])
+
+
 def same_item(field: SchemaField, earlier: dict, later: dict, earlier_chunk: Chunk, later_chunk: Chunk,
               spans: _Spans, continuation: bool = False) -> bool:
     """Conservative identity test for two items of an object list from adjacent chunks: no
     conflicting values, and shared evidence (an equal verbatim/number/date value, or overlapping
-    source spans for text quotes). A later item with no scalar values at all is a continuation."""
+    source spans for text quotes). A later item with no scalar values at all is a continuation.
+    Items with no single-value children at all need list members quoting the same source text."""
+    scalars = _scalar_children(field)
+    if not scalars:
+        return any(_overlap(spans(a, earlier_chunk), spans(b, later_chunk))
+                   for child in field.fields if child.array and child.type != "object"
+                   for a in earlier.get(child.name) or [] for b in later.get(child.name) or [])
     shared = has_values = False
-    for child in _scalar_children(field):
+    for child in scalars:
         first, second = earlier.get(child.name), later.get(child.name)
         x = first.value if isinstance(first, Leaf) else None
         y = second.value if isinstance(second, Leaf) else None
@@ -470,13 +480,14 @@ def same_item(field: SchemaField, earlier: dict, later: dict, earlier_chunk: Chu
         if x is None or y is None:
             continue
         if child.type == "text":  # paraphrased: compare where the evidence is, not the wording
-            a, b = spans(first, earlier_chunk), spans(second, later_chunk)
-            if not (a and b) or min(a[1], b[1]) <= max(a[0], b[0]):
+            if not _overlap(spans(first, earlier_chunk), spans(second, later_chunk)):
                 return False  # unverifiable or different evidence
             shared = True
             continue
         p, q = _norm(x), _norm(y)
-        prefix = child.type == "verbatim" and min(len(p), len(q)) >= 3 and (p.startswith(q) or q.startswith(p))
+        # A verbatim value cut off by the split: one is a prefix of the other, quoting the same text.
+        prefix = (child.type == "verbatim" and min(len(p), len(q)) >= 3 and (p.startswith(q) or q.startswith(p))
+                  and _overlap(spans(first, earlier_chunk), spans(second, later_chunk)))
         if p != q and not prefix:
             return False
         shared = shared or child.type in IDENTITY_TYPES

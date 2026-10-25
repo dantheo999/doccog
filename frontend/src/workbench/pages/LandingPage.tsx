@@ -79,14 +79,14 @@ export default function LandingPage({ solutions, error, onRefresh }: Props) {
 
     {runs.length > 0 && <section aria-labelledby="recent-heading">
       <h2 id="recent-heading" className="section-heading">Recent runs</h2>
-      <table className="wb-table">
+      <div className="wb-table-scroll"><table className="wb-table">
         <thead><tr><th>Run</th><th>Solution</th><th>Schema</th><th>Documents</th><th>Status</th><th>Created</th></tr></thead>
         <tbody>{runs.slice(0, 6).map(run => <tr key={run.id}>
           <td><a href={href(solutions?.find(item => item.id === run.solution)?.route ?? "/compare", { run: run.id })}>{run.label}</a></td>
           <td>{run.solution_name}</td><td>{run.schema_name} v{run.schema_version}</td>
           <td>{run.documents_done}/{run.documents_total}</td><td><span className={`run-status ${run.status}`}>{run.status}</span></td>
           <td>{new Date(run.created_at).toLocaleString()}</td></tr>)}</tbody>
-      </table>
+      </table></div>
     </section>}
   </div>;
 }
