@@ -142,3 +142,16 @@ it("starts a run with the agreed schema and shows grounded, scored values", asyn
   fireEvent.click(record);
   expect(await screen.findByRole("button", { name: "22 October 2019" })).toHaveAttribute("aria-pressed", "true");
 });
+
+it("ignores stored run settings that no longer fit their type", async () => {
+  withWorkspace();
+  solutions = [solution({ settings: [
+    { key: "max_tokens", label: "Maximum output tokens", type: "integer", default: 4096, help: "", min: 256, max: 32768, options: null },
+    { key: "reasoning_effort", label: "Reasoning effort", type: "select", default: "low", help: "", min: null, max: null, options: ["low", "high"] },
+  ] })];
+  localStorage.setItem("doc-cognition.settings.llm", JSON.stringify({ max_tokens: null, reasoning_effort: "extreme" }));
+  window.location.hash = "#/apps/llm";
+  render(<App />);
+  expect(await screen.findByLabelText("Maximum output tokens")).toHaveValue(4096);
+  expect(screen.getByLabelText("Reasoning effort")).toHaveValue("low");
+});

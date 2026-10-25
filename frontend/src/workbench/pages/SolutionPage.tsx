@@ -5,7 +5,7 @@ import { message, workbench } from "../api";
 import { href, navigate, useRoute } from "../router";
 import type { RunSummary, SolutionInfo } from "../types";
 import { useWorkspace } from "../workspace";
-import SettingsForm, { defaults, settingsErrors } from "../components/SettingsForm";
+import SettingsForm, { defaults, settingsErrors, storedValueFits } from "../components/SettingsForm";
 import RunViewer from "../components/RunViewer";
 import LangExtractStudio from "../../LangExtractStudio";
 import { loadRecipe } from "../../recipe";
@@ -18,7 +18,10 @@ function loadSettings(solution: SolutionInfo): Record<string, unknown> {
   const base = defaults(solution.settings);
   try {
     const stored = JSON.parse(localStorage.getItem(settingsKey(solution.id)) ?? "{}");
-    return Object.fromEntries(Object.entries(base).map(([key, value]) => [key, key in stored ? stored[key] : value]));
+    if (!stored || typeof stored !== "object") return base;
+    // A stored value is reused only if it still fits the setting (e.g. a cleared number is saved as null).
+    return Object.fromEntries(solution.settings.map(spec =>
+      [spec.key, storedValueFits(spec, stored[spec.key]) ? stored[spec.key] : base[spec.key]]));
   } catch { return base; }
 }
 

@@ -11,6 +11,16 @@ export function defaults(specs: SettingSpec[]): Record<string, unknown> {
   return Object.fromEntries(specs.map(spec => [spec.key, spec.default]));
 }
 
+/** Whether a stored value has the spec's type (a cleared number field is stored as null, from NaN). */
+export function storedValueFits(spec: SettingSpec, value: unknown): boolean {
+  switch (spec.type) {
+    case "boolean": return typeof value === "boolean";
+    case "integer": case "number": return typeof value === "number" && Number.isFinite(value);
+    case "select": return typeof value === "string" && (!spec.options || spec.options.includes(value));
+    default: return typeof value === "string";
+  }
+}
+
 export function settingsErrors(specs: SettingSpec[], values: Record<string, unknown>): string[] {
   return specs.flatMap(spec => {
     const value = values[spec.key];

@@ -1,6 +1,6 @@
 /** Pure helpers for schema suggestions: shared constants, stats, settings storage and the field-path comparison. */
 import type { SchemaDraft, SchemaField, SchemaSuggestion, SettingSpec, SharedSuggestionResult, SolutionInfo, Usage } from "../types";
-import { defaults } from "./SettingsForm";
+import { defaults, storedValueFits } from "./SettingsForm";
 
 /** The solution id the backend stores the shared, solution-neutral suggestion under. */
 export const SHARED_ID = "shared";
@@ -117,16 +117,6 @@ const settingsKey = (solutionId: string) => `doc-cognition.suggest-settings.${so
 
 export function suggestionSpecs(solution: SolutionInfo): SettingSpec[] {
   return solution.schema_suggestion?.settings ?? [];
-}
-
-/** Whether a stored value has the spec's type (a cleared number field is stored as null, from NaN). */
-function storedValueFits(spec: SettingSpec, value: unknown): boolean {
-  switch (spec.type) {
-    case "boolean": return typeof value === "boolean";
-    case "integer": case "number": return typeof value === "number" && Number.isFinite(value);
-    case "select": return typeof value === "string" && (!spec.options || spec.options.includes(value));
-    default: return typeof value === "string";
-  }
 }
 
 export function loadSuggestionSettings(solution: SolutionInfo): Record<string, unknown> {
