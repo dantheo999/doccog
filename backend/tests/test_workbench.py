@@ -304,3 +304,18 @@ def test_unstract_results_file_is_collated_into_a_grounded_run():
     empty = client.post("/api/solutions/unstract/import", json={
         "schema_id": saved["id"], "document_ids": [uploaded["id"]], "files": [{"name": "x.json", "content": {"message": []}}]})
     assert empty.status_code == 422
+
+
+def test_recovery_only_closes_runs_whose_runner_is_gone():
+    from app.storage import now
+    runs = RunStore(None)
+    base = dict(solution="fake", solution_name="Fake", label="t", model="m", confidence_method="c",
+                extraction_schema=schema(), settings={}, documents=[
+                    DocumentResult(document_id="d", document_name="d.txt", document_sha256="0" * 64, status="running")])
+    runs.save(Run(id="live", status="running", created_at=now(), heartbeat_at=now(), **base))
+    runs.save(Run(id="dead", status="running", created_at="2026-10-25T00:00:00+00:00",
+                  heartbeat_at="2026-10-25T00:00:00+00:00", **base))
+    JobRunner(runs, DocumentStore()).recover()
+    assert runs.get("live").status == "running"
+    dead = runs.get("dead")
+    assert dead.status == "error" and dead.documents[0].status == "cancelled"

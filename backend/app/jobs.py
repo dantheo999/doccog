@@ -1,5 +1,6 @@
 """Background execution of extraction runs, persisted after every document."""
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import logging
 import threading
 import time
@@ -13,6 +14,19 @@ from app.storage import RunStore, now
 
 
 logger = logging.getLogger(__name__)
+HEARTBEAT_SECONDS = 15
+STALE_SECONDS = 90  # a run whose heartbeat is older than this has lost its runner
+
+
+def heartbeat_age(run: Run) -> float:
+    stamp = run.heartbeat_at or run.started_at or run.created_at
+    try:
+        then = datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return float("inf")
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - then).total_seconds()
 
 
 class JobRunner:
@@ -24,18 +38,25 @@ class JobRunner:
         self._guard = threading.Lock()
 
     def recover(self):
-        """Runs left queued/running by a previous process can't resume; mark them interrupted."""
+        """Close runs whose runner is gone (backend restart or crash): queued/running, not owned by
+        this process, and with a stale heartbeat. Runs another live process owns keep running."""
         for summary in self.runs.list():
             if summary["status"] in ("queued", "running"):
-                run = self.runs.get(summary["id"])
-                for document in run.documents:
-                    if document.status in ("queued", "running"):
-                        document.status = "cancelled"
-                        document.error = "Interrupted by a backend restart."
-                run.status = "error"
-                run.error = "Interrupted by a backend restart. Start a new run."
-                run.finished_at = now()
-                self.runs.save(run)
+                self.reconcile(self.runs.get(summary["id"]))
+
+    def reconcile(self, run: Run) -> Run:
+        if (run.status not in ("queued", "running") or self.active(run.id)
+                or heartbeat_age(run) < STALE_SECONDS):
+            return run
+        for document in run.documents:
+            if document.status in ("queued", "running"):
+                document.status = "cancelled"
+                document.error = "Interrupted: the backend stopped while this run was in progress."
+        run.status = "error"
+        run.error = "Interrupted: the backend stopped while this run was in progress. Start a new run."
+        run.finished_at = now()
+        self.runs.save(run)
+        return run
 
     def active(self, run_id: str) -> bool:
         with self._guard:
@@ -43,6 +64,7 @@ class JobRunner:
 
     def start(self, run: Run, solution: Solution, wait: bool = False) -> threading.Thread:
         context = RunContext(store=self.store)
+        run.heartbeat_at = now()
         with self._guard:
             self._contexts[run.id] = context
             self._locks[run.id] = threading.Lock()
@@ -66,10 +88,17 @@ class JobRunner:
         with self._locks[run.id]:
             self.runs.save(run)
 
+    def _beat(self, run: Run, done: threading.Event):
+        while not done.wait(HEARTBEAT_SECONDS):
+            run.heartbeat_at = now()
+            self._save(run)
+
     def _execute(self, run: Run, solution: Solution, context: RunContext):
         run.status = "running"
-        run.started_at = now()
+        run.started_at = run.heartbeat_at = now()
         self._save(run)
+        finished = threading.Event()
+        threading.Thread(target=self._beat, args=(run, finished), name=f"beat-{run.id}", daemon=True).start()
         try:
             with ThreadPoolExecutor(max_workers=max(1, solution.document_concurrency)) as pool:
                 list(pool.map(lambda index: self._document(run, index, solution, context),
@@ -86,6 +115,7 @@ class JobRunner:
             run.status = "error"
             run.error = "The run stopped unexpectedly. Check the backend logs."
         finally:
+            finished.set()
             run.finished_at = now()
             self._save(run)
             with self._guard:

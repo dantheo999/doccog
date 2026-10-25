@@ -95,6 +95,7 @@ class Run(StrictModel):
     created_at: str
     started_at: str | None = None
     finished_at: str | None = None
+    heartbeat_at: str | None = None  # refreshed while a runner owns the run
     documents: list[DocumentResult]
 
     def summary(self) -> dict:
