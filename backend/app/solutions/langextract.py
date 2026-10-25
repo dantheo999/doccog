@@ -233,7 +233,10 @@ DEFAULT_SUGGESTION_GOAL = (
     "Extract the recurring, structured information in documents of this type: people and organisations with "
     "their roles, dates, decisions, actions or obligations with owners and due dates, amounts and other key "
     "facts. Record the details of each item as attributes.")
-NUMBER = re.compile(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
+# Numbers that survive a round trip: no leading zeros ("007") and no trailing fractional zeros ("4.10").
+NUMBER = re.compile(r"-?(?:[1-9]\d{0,2}(?:,\d{3})+|0|[1-9]\d*)(?:\.\d*[1-9])?")
+# Digits with separators that are not such numbers: item numbers (4.10, 4.1.2) and references (007).
+NUMBER_LIKE = re.compile(r"-?\d[\d,]*(?:\.\d+)*")
 BOOLEAN_WORDS = ("true", "false", "yes", "no")
 MAX_CHILDREN = 40
 
@@ -267,6 +270,9 @@ def infer_type(values: list[JsonValue]) -> tuple[FieldType, bool]:
         return ("integer" if all(number.is_integer() for number in numbers) else "number"), False
     if all(isinstance(value, str) and parse_date(value) for value in present):
         return "date", False
+    if all(_number(value) is not None or (isinstance(value, str) and NUMBER_LIKE.fullmatch(value.strip()))
+           for value in present):
+        return "verbatim", False  # numbering or references: a number type would lose 4.10 vs 4.1, or 007
     return "text", False
 
 

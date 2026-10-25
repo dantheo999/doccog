@@ -294,6 +294,10 @@ a.primary, a.secondary { text-decoration: none; }
 .suggest-job.done { color: #8cdbc0; }
 .suggest-job.error { color: #ffb7bb; }
 .suggest-job svg { flex-shrink: 0; }
+.suggest-option-errors { margin: 5px 0 0; padding: 0 0 0 15px; font-size: 10px; line-height: 1.5; color: #ffb7bb; }
+.suggest-option-text .show-editor { font-size: 10px; padding: 2px 0 0; }
+.suggest-invalid { color: #ffb7bb; }
+.workspace-schema h2:focus:not(:focus-visible) { outline: none; }
 .suggest-option-settings { margin-top: 6px; }
 .suggest-option-settings summary, .suggestion-card details summary, .suggest-recent summary { cursor: pointer; font-size: 10px; color: #cfd9e8; }
 .suggest-option-settings .settings-form, .suggestion-settings .settings-form { padding: 0; }

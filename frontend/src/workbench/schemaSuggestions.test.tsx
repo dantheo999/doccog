@@ -2,8 +2,8 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { SuggestionComparison } from "./components/SchemaSuggestions";
-import { compareDrafts, schemaDepth } from "./components/schemaSuggestionModel";
-import type { SchemaDraft, SchemaField, SchemaSuggestion, SolutionInfo } from "./types";
+import { compareDrafts, formatSeconds, formatWhen, schemaDepth, whenLabels } from "./components/schemaSuggestionModel";
+import type { SchemaDraft, SchemaField, SchemaSuggestion, SettingSpec, SolutionInfo } from "./types";
 
 const leaf = (name: string, type: SchemaField["type"], array = false): SchemaField =>
   ({ name, type, description: "", array, options: [], fields: [] });
@@ -23,6 +23,10 @@ const collection = { id: "c1", name: "minutes", created_at: "2026-10-25", update
 ] };
 const usage = { calls: 1, prompt_tokens: 1200, completion_tokens: 300 };
 const UNSTRACT_REASON = "Unstract's open-source edition has no prompt or schema generation.";
+const NUEXTRACT_SPECS: SettingSpec[] = [
+  { key: "enable_thinking", label: "Reasoning mode", type: "boolean", default: false, help: "", min: null, max: null, options: null },
+  { key: "max_tokens", label: "Maximum output tokens", type: "integer", default: 4096, help: "", min: 256, max: 32768, options: null },
+];
 
 const solution = (overrides: Partial<SolutionInfo>): SolutionInfo => ({
   id: "llm", name: "Direct LLM", tagline: "Prompted", description: "Calls the model.", technology: "Azure OpenAI",
@@ -198,7 +202,8 @@ describe("workspace schema suggestions", () => {
 
   it("loads a saved suggestion into the editor, confirming over unsaved edits, and deletes suggestions", async () => {
     stored = [
-      suggestion({ id: "sh0", solution: "shared", solution_name: "Shared suggestion", draft: sharedDraft, created_at: "2026-10-25T09:00:00Z" }),
+      suggestion({ id: "sh0", solution: "shared", solution_name: "Shared suggestion", draft: sharedDraft, notes: ["Attendance varies."],
+        created_at: "2026-10-25T09:00:00Z" }),
       suggestion({ id: "llm0", notes: ["Decisions are listed per item."] }),
       suggestion({ id: "other", document_ids: ["elsewhere"], solution_name: "Other set" }),
     ];
@@ -209,11 +214,112 @@ describe("workspace schema suggestions", () => {
     fireEvent.click(within(llmCard).getByRole("button", { name: "Use as draft" }));
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Replace the current draft"));
     expect(await screen.findByLabelText("Field name decisions")).toHaveValue("decisions");
-    expect(within(screen.getByRole("region", { name: "Model notes" })).getByText("Decisions are listed per item.")).toBeInTheDocument();
+    const notes = screen.getByRole("region", { name: "Model notes" });
+    expect(within(notes).getByText("Decisions are listed per item.")).toBeInTheDocument();
+    expect(within(notes).getByText("· from Direct LLM's suggestion")).toBeInTheDocument();
     expect(within(llmCard).getByText("in editor")).toBeInTheDocument();
+    // The editor sits below the cards, so "Use as draft" brings it into view and moves focus to it.
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Agreed schema" })).toHaveFocus());
+    fireEvent.click(within(await screen.findByRole("article", { name: /^Shared suggestion/ })).getByRole("button", { name: "Use as draft" }));
+    expect(within(screen.getByRole("region", { name: "Model notes" })).getByText("· from the shared suggestion")).toBeInTheDocument();
+    fireEvent.click(within(llmCard).getByRole("button", { name: "Use as draft" }));
     fireEvent.click(within(llmCard).getByRole("button", { name: /^Delete Direct LLM suggestion/ }));
     await waitFor(() => expect(screen.queryByRole("article", { name: /^Direct LLM/ })).not.toBeInTheDocument());
     expect(requests.some(item => item.method === "DELETE" && item.url === "/api/schema-suggestions/llm0")).toBe(true);
+  });
+
+  it("keeps the user's draft when the shared result arrives after they loaded or edited another one", async () => {
+    let openShared!: () => void;
+    const sharedGate = new Promise<void>(resolve => { openShared = resolve; });
+    const mocked = globalThis.fetch as unknown as (input: string, init?: RequestInit) => Promise<Response>;
+    vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
+      if (input === "/api/schemas/suggest") await sharedGate;
+      return mocked(input, init);
+    }));
+    openWorkspace();
+    fireEvent.click(await screen.findByLabelText("Use minutes/a.txt as exemplar"));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Direct LLM" }));
+    fireEvent.click(screen.getByRole("button", { name: "Suggest from 1 exemplar · 2 methods" }));
+    const llmCard = await screen.findByRole("article", { name: /^Direct LLM/ });
+    fireEvent.click(within(llmCard).getByRole("button", { name: "Use as draft" }));
+    fireEvent.change(await screen.findByLabelText("Field name decisions"), { target: { value: "resolutions" } });
+    confirm.mockClear();
+    openShared();
+    await screen.findByText(/Kept under Suggestions; the editor draft changed while it ran/);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Field name resolutions")).toHaveValue("resolutions");
+    expect(screen.queryByLabelText("Field name attendees.role")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show in editor" })).not.toBeInTheDocument();
+    // The shared result is still a card, so it can be loaded later.
+    expect(await screen.findByRole("article", { name: /^Shared suggestion/ })).toBeInTheDocument();
+  });
+
+  it("loads a shared-only result into the editor and brings the editor into view", async () => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    try {
+      openWorkspace();
+      fireEvent.click(await screen.findByLabelText("Use minutes/a.txt as exemplar"));
+      fireEvent.click(screen.getByRole("button", { name: "Suggest from 1 exemplar" }));
+      expect(await screen.findByLabelText("Field name attendees.role")).toHaveValue("role");
+      await waitFor(() => expect(scroll).toHaveBeenCalledTimes(1));
+      expect(scroll.mock.contexts[0]).toBe(screen.getByRole("heading", { name: "Agreed schema" }).closest("section"));
+      fireEvent.click(screen.getByRole("button", { name: "Show in editor" }));
+      await waitFor(() => expect(scroll).toHaveBeenCalledTimes(2));
+      expect(screen.getByRole("heading", { name: "Agreed schema" })).toHaveFocus();
+    } finally { delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView; }
+  });
+
+  it("validates a solution's suggestion settings before suggesting, like the Solution page", async () => {
+    solutions[1] = { ...solutions[1], status: { ready: true, detail: "", model: "nu" },
+      schema_suggestion: { supported: true, method: "Native template generation.", settings: NUEXTRACT_SPECS } };
+    openWorkspace();
+    fireEvent.click(await screen.findByLabelText("Use minutes/a.txt as exemplar"));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "NuExtract3" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Shared suggestion" }));
+    fireEvent.click(screen.getByText("NuExtract3 suggestion settings"));
+    fireEvent.change(screen.getByLabelText("Maximum output tokens"), { target: { value: "100" } });
+    const row = screen.getByRole("checkbox", { name: "NuExtract3" }).closest(".suggest-option") as HTMLElement;
+    expect(within(row).getByRole("list", { name: "NuExtract3 suggestion settings errors" }))
+      .toHaveTextContent("Maximum output tokens: must be between 256 and 32768.");
+    const button = screen.getByRole("button", { name: "Suggest from 1 exemplar" });
+    expect(button).toBeDisabled();
+    expect(screen.getByText(/Fix the suggestion settings of NuExtract3/)).toBeInTheDocument();
+    // Unticking the method lifts the block; ticking it again brings it back.
+    fireEvent.click(screen.getByRole("checkbox", { name: "NuExtract3" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Shared suggestion" }));
+    expect(button).toBeEnabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Shared suggestion" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "NuExtract3" }));
+    expect(button).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Maximum output tokens"), { target: { value: "2048" } });
+    expect(within(row).queryByRole("list", { name: /settings errors/ })).not.toBeInTheDocument();
+    fireEvent.click(button);
+    await waitFor(() => expect(requests.some(item => item.url === "/api/solutions/nuextract/suggest-schema")).toBe(true));
+    expect(requests.find(item => item.url === "/api/solutions/nuextract/suggest-schema")!.body)
+      .toEqual({ document_ids: ["d1"], guidance: "", settings: { enable_thinking: false, max_tokens: 2048 } });
+  });
+
+  it("tells apart suggestions from the same solution made in the same minute", async () => {
+    stored = [
+      suggestion({ id: "llmA", created_at: "2026-10-25T18:47:05Z" }),
+      suggestion({ id: "llmB", created_at: "2026-10-25T18:47:40Z", draft: sharedDraft }),
+    ];
+    openWorkspace();
+    const cards = await screen.findAllByRole("article", { name: /^Direct LLM/ });
+    const labels = cards.map(card => card.getAttribute("aria-label"));
+    expect(new Set(labels).size).toBe(2);
+    const boxes = screen.getAllByRole("checkbox", { name: /^Compare Direct LLM suggestion from/ });
+    expect(new Set(boxes.map(box => box.getAttribute("aria-label"))).size).toBe(2);
+    boxes.forEach(box => fireEvent.click(box));
+    const comparison = await screen.findByRole("region", { name: "Comparison" });
+    // Columns follow the order ticked (newest card first) and use the cards' "when" labels.
+    const headers = Array.from(comparison.querySelectorAll(".compare-col-name"), cell => cell.textContent);
+    expect(headers).toEqual(labels.map(label => label!.replace(/^Direct LLM, (.*)$/, "Direct LLM ($1)")));
+    expect(new Set(headers).size).toBe(2);
+    const row = (path: string) => within(comparison).getByRole("rowheader", { name: path }).closest("tr")!;
+    expect(within(row("decisions")).getByText(`Only in ${headers[1]}`)).toBeInTheDocument();
+    expect(within(row("attendees[].role")).getByText(`Only in ${headers[0]}`)).toBeInTheDocument();
   });
 });
 
@@ -235,6 +341,37 @@ describe("suggestion comparison", () => {
     expect(ordered.map(row => row.path)).toEqual(["items", "items[].title", "items[].solo", "only_here"]);
     expect(schemaDepth(sharedDraft.fields)).toBe(2);
     expect(schemaDepth([leaf("a", "text")])).toBe(1);
+  });
+
+  it("takes child list markers from the object cells and flags disagreement", () => {
+    const owner = [leaf("owner", "text")];
+    expect(compareDrafts([
+      { name: "a", description: "", fields: [leaf("action", "verbatim", true)] },
+      { name: "b", description: "", fields: [object("action", owner, false)] },
+    ]).map(row => row.path)).toEqual(["action", "action.owner"]);
+    expect(compareDrafts([
+      { name: "a", description: "", fields: [object("action", owner, true)] },
+      { name: "b", description: "", fields: [object("action", owner, false)] },
+    ]).map(row => row.path)).toEqual(["action", "action[?].owner"]);
+  });
+
+  it("formats durations without a 60-second remainder", () => {
+    expect([4.25, 59.6, 89.6, 104.8, 119.6, 179.5, 3600].map(formatSeconds))
+      .toEqual(["4.3 s", "60 s", "1 min 30 s", "1 min 45 s", "2 min 0 s", "3 min 0 s", "60 min 0 s"]);
+  });
+
+  it("labels suggestion times to the minute, then the second, then with an ordinal", () => {
+    const at = (id: string, created_at: string, solution_name = "Direct LLM") => suggestion({ id, created_at, solution_name });
+    const labels = whenLabels([at("a", "2026-10-25T18:47:05Z"), at("b", "2026-10-25T18:47:40Z"), at("c", "2026-10-25T18:47:40Z"),
+      at("d", "2026-10-25T18:47:40Z", "LangExtract"), at("e", "2026-10-25T19:10:00Z")]);
+    expect(labels).toEqual({
+      a: formatWhen("2026-10-25T18:47:05Z", true), // shares its minute with b and c: to the second
+      b: `${formatWhen("2026-10-25T18:47:40Z", true)} #1`, // b and c share the second: numbered in creation order
+      c: `${formatWhen("2026-10-25T18:47:40Z", true)} #2`,
+      d: formatWhen("2026-10-25T18:47:40Z"), // another solution does not clash
+      e: formatWhen("2026-10-25T19:10:00Z"),
+    });
+    expect(formatWhen("2026-10-25T18:47:05Z", true)).not.toBe(formatWhen("2026-10-25T18:47:40Z", true));
   });
 
   it("renders a compact table that marks unique and different rows", () => {
@@ -300,6 +437,23 @@ describe("solution page schema suggestion", () => {
     expect(confirm).toHaveBeenCalled();
     expect(JSON.parse(localStorage.getItem("doc-cognition.schema-draft.v1")!).name).toBe("Edited by hand");
     expect(window.location.hash).toBe("#/apps/llm");
+  });
+
+  it("falls back to the default for a cleared or mistyped stored setting", async () => {
+    solutions[1] = { ...solutions[1], status: { ready: true, detail: "", model: "nu" },
+      schema_suggestion: { supported: true, method: "Native template generation.", settings: NUEXTRACT_SPECS } };
+    localStorage.setItem("doc-cognition.suggest-settings.nuextract", JSON.stringify({ enable_thinking: "yes", max_tokens: null }));
+    openSolution("/apps/nuextract");
+    const panel = await screen.findByRole("region", { name: "Schema suggestion" });
+    fireEvent.click(await within(panel).findByLabelText("Use minutes/a.txt as suggestion exemplar"));
+    expect(within(panel).getByLabelText("Maximum output tokens")).toHaveValue(4096);
+    expect(within(panel).queryByText(/enter a number/)).not.toBeInTheDocument();
+    const suggest = within(panel).getByRole("button", { name: /Suggest schema/ });
+    expect(suggest).toBeEnabled();
+    fireEvent.click(suggest);
+    await waitFor(() => expect(requests.some(item => item.url === "/api/solutions/nuextract/suggest-schema")).toBe(true));
+    expect(requests.find(item => item.url === "/api/solutions/nuextract/suggest-schema")!.body)
+      .toEqual({ document_ids: ["d1"], guidance: "", settings: { enable_thinking: false, max_tokens: 4096 } });
   });
 
   it("shows the reason instead of a panel when the solution cannot suggest", async () => {

@@ -6,9 +6,10 @@ import { useWorkspace } from "../workspace";
 import SchemaEditor, { schemaErrors } from "../components/SchemaEditor";
 import { SuggestWithPicker, SuggestionsSection } from "../components/SchemaSuggestions";
 import type { SuggestJob } from "../components/SchemaSuggestions";
+import { settingsErrors } from "../components/SettingsForm";
 import {
   MAX_GUIDANCE, SCHEMA_DRAFT_KEY, SHARED_ID, loadSuggestionSettings, loadWorkspaceDraft, sameDraft, sharedSuggestion,
-  storeSuggestionSettings, suggestionsFor,
+  storeSuggestionSettings, suggestionSpecs, suggestionsFor,
 } from "../components/schemaSuggestionModel";
 import { downloadJson } from "../../recipe";
 
@@ -25,9 +26,14 @@ export default function WorkspacePage() {
   const [exemplars, setExemplars] = useState<string[]>([]);
   const [preview, setPreview] = useState<StoredDocument | null>(null);
   const [draft, setDraft] = useState<SchemaDraft | null>(() => loadWorkspaceDraft());
+  /** The draft as last rendered, for suggestions that finish after the user changed it. */
+  const draftRef = useRef(draft);
   const [notes, setNotes] = useState<string[]>([]);
-  /** Where the notes above the editor came from, when not the shared suggestion just run. */
+  /** Where the notes above the editor came from (e.g. "Direct LLM's suggestion"), when not the shared suggestion just run. */
   const [notesSource, setNotesSource] = useState<string | null>(null);
+  /** Bring the editor into view after a suggestion loads into it (it sits below the suggestion cards). */
+  const schemaPanel = useRef<HTMLElement>(null);
+  const [reveal, setReveal] = useState<{ count: number; focus: boolean }>({ count: 0, focus: false });
   const [guidance, setGuidance] = useState("");
   const [effort, setEffort] = useState("medium");
   const [busy, setBusy] = useState<"save" | null>(null);
@@ -48,8 +54,15 @@ export default function WorkspacePage() {
     if (!draft && workspace.schema) setDraft({ name: workspace.schema.name, description: workspace.schema.description, fields: workspace.schema.fields });
   }, [workspace.schema, draft]);
   useEffect(() => {
+    draftRef.current = draft;
     try { if (draft) localStorage.setItem(SCHEMA_DRAFT_KEY, JSON.stringify(draft)); } catch { /* quota */ }
   }, [draft]);
+  useEffect(() => {
+    if (!reveal.count) return;
+    schemaPanel.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    if (reveal.focus) schemaPanel.current?.querySelector<HTMLElement>("#schema-heading")?.focus({ preventScroll: true });
+  }, [reveal]);
+  const showEditor = useCallback((focus: boolean) => setReveal(current => ({ count: current.count + 1, focus })), []);
   useEffect(() => {
     workbench.solutions().then(items => {
       setSolutions(items);
@@ -113,6 +126,12 @@ export default function WorkspacePage() {
   const chosenMethods = methods.filter(id => id === SHARED_ID || capable.has(id));
   const runnable = chosenMethods.filter(id => jobs[id]?.status !== "running");
   const suggesting = chosenMethods.some(id => jobs[id]?.status === "running");
+  // Same checks as the Solution page panel: the backend would otherwise silently fall back to defaults.
+  const suggestionErrors: Record<string, string[]> = Object.fromEntries(solutions
+    .filter(item => chosenMethods.includes(item.id))
+    .map(item => [item.id, settingsErrors(suggestionSpecs(item), solutionSettings[item.id] ?? {})] as const)
+    .filter(([, problems]) => problems.length > 0));
+  const invalidMethods = solutions.filter(item => suggestionErrors[item.id]).map(item => item.name);
 
   function upsertSuggestion(suggestion: SchemaSuggestion) {
     listRequest.current++; // a list request already in flight predates this suggestion
@@ -121,8 +140,9 @@ export default function WorkspacePage() {
 
   /** One request per chosen method, in parallel; each has its own loading and error state. */
   async function suggest() {
-    if (!exemplars.length || !runnable.length) return;
+    if (!exemplars.length || !runnable.length || invalidMethods.length) return;
     const documentIds = [...exemplars];
+    const startDraft = draft;
     const text = guidance;
     const reasoning = effort;
     const batch = [...runnable];
@@ -134,12 +154,18 @@ export default function WorkspacePage() {
       try {
         let suggestionId: string | undefined;
         let fields: number;
+        let kept = false;
         if (id === SHARED_ID) {
           const result = await workbench.suggestSchema(documentIds, text, reasoning);
-          setDraft(result.draft);
-          setNotes(result.notes);
-          setNotesSource(null);
-          setSaved(null);
+          // Load it only if the user has not changed the draft meanwhile (e.g. "Use as draft" on a faster method).
+          kept = !sameDraft(draftRef.current, startDraft);
+          if (!kept) {
+            setDraft(result.draft);
+            setNotes(result.notes);
+            setNotesSource(null);
+            setSaved(null);
+            if (batch.length === 1) showEditor(false);
+          }
           if (result.id) upsertSuggestion(sharedSuggestion({ ...result, id: result.id }, documentIds, text, reasoning));
           suggestionId = result.id;
           fields = result.draft.fields.length;
@@ -151,7 +177,7 @@ export default function WorkspacePage() {
         }
         const added = suggestionId;
         if (batch.length > 1 && added) setCompare(current => current.includes(added) ? current : [...current, added]);
-        setJobs(current => ({ ...current, [id]: { status: "done", started, finished: Date.now(), fields } }));
+        setJobs(current => ({ ...current, [id]: { status: "done", started, finished: Date.now(), fields, ...(kept ? { kept } : {}) } }));
       } catch (failure) {
         setJobs(current => ({ ...current, [id]: { status: "error", started, finished: Date.now(), error: message(failure) } }));
       }
@@ -165,8 +191,9 @@ export default function WorkspacePage() {
       && !window.confirm("Replace the current draft with this suggestion? Its unsaved changes will be lost.")) return;
     setDraft(suggestion.draft);
     setNotes(suggestion.notes ?? []);
-    setNotesSource(suggestion.solution_name);
+    setNotesSource(suggestion.solution === SHARED_ID ? "the shared suggestion" : `${suggestion.solution_name}'s suggestion`);
     setSaved(null);
+    showEditor(true);
   }
 
   async function deleteSuggestion(suggestion: SchemaSuggestion) {
@@ -265,9 +292,9 @@ export default function WorkspacePage() {
               onSettingsChange={(id, values) => {
                 setSolutionSettings(current => ({ ...current, [id]: values }));
                 storeSuggestionSettings(id, values);
-              }} />
+              }} errors={suggestionErrors} onShowEditor={() => showEditor(true)} />
             <div className="suggest-actions">
-              <button className="primary" onClick={() => void suggest()} disabled={!exemplars.length || !runnable.length}>
+              <button className="primary" onClick={() => void suggest()} disabled={!exemplars.length || !runnable.length || invalidMethods.length > 0}>
                 {suggesting ? <LoaderCircle size={15} className="spin" /> : <Sparkles size={15} />}
                 {suggesting && !runnable.length ? "Analysing exemplars…"
                   : `Suggest from ${exemplars.length || "selected"} exemplar${exemplars.length === 1 ? "" : "s"}${runnable.length > 1 ? ` · ${runnable.length} methods` : ""}`}</button>
@@ -277,15 +304,17 @@ export default function WorkspacePage() {
             {!exemplars.length ? <p className="microcopy">Tick up to five exemplar documents on the left. The model reads their full text and proposes
               fields, types and nested object arrays for documents of this type.</p>
               : !chosenMethods.length && <p className="microcopy">Choose at least one method to suggest with.</p>}
-            {chosenMethods.length > 1 && <p className="microcopy">The shared suggestion loads into the editor; every result is kept under
-              Suggestions below, ticked for comparison.</p>}
+            {invalidMethods.length > 0 && <p className="microcopy suggest-invalid" role="status">Fix the suggestion settings
+              of {invalidMethods.join(" and ")}, or untick {invalidMethods.length === 1 ? "it" : "them"}, to suggest.</p>}
+            {chosenMethods.length > 1 && <p className="microcopy">The shared suggestion loads into the editor unless you change the draft
+              while it runs; every result is kept under Suggestions below, ticked for comparison.</p>}
           </div>
           {collection && <SuggestionsSection suggestions={visibleSuggestions} solutions={solutions} draft={draft} compare={compare}
             onCompareChange={setCompare} onUse={applySuggestion} onDelete={suggestion => void deleteSuggestion(suggestion)} />}
         </section>
 
-        <section className="panel workspace-schema" aria-labelledby="schema-heading">
-          <div className="panel-title"><h2 id="schema-heading">Agreed schema</h2>
+        <section className="panel workspace-schema" aria-labelledby="schema-heading" ref={schemaPanel}>
+          <div className="panel-title"><h2 id="schema-heading" tabIndex={-1}>Agreed schema</h2>
             {workspace.schema && <span className="pill success">v{workspace.schema.version} · {workspace.schema.fields.length} fields</span>}
             <span className="spacer" />
             <button className="icon-button" title="Import schema JSON" aria-label="Import schema JSON" onClick={() => importInput.current?.click()}><Upload size={14} /></button>
@@ -295,7 +324,7 @@ export default function WorkspacePage() {
               onClick={() => draft && downloadJson(draft, `${draft.name || "schema"}.schema.json`)}><Download size={14} /></button>
           </div>
           {notes.length > 0 && <div className="suggest-notes" role="region" aria-label="Model notes"><span className="eyebrow">MODEL NOTES</span>
-            {notesSource && <span className="microcopy notes-source"> · from the {notesSource} suggestion</span>}
+            {notesSource && <span className="microcopy notes-source"> · from {notesSource}</span>}
             <ul>{notes.map(note => <li key={note}>{note}</li>)}</ul></div>}
           {draft ? <>
             <SchemaEditor draft={draft} onChange={next => { setDraft(next); setSaved(null); }} />

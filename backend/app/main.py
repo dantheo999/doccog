@@ -1,13 +1,15 @@
 import logging
 import threading
 import time
+from typing import Any
 from uuid import uuid4
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-from fastapi import FastAPI, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, Form, HTTPException, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import Field, JsonValue, model_validator
+from pydantic import Field, JsonValue, ValidationError, model_validator
 
 from app.azure import REASONING_EFFORTS, ServiceError
 from app.cognition import CognitionError, extract_document, generate_recipe, optimize_recipe
@@ -241,12 +243,21 @@ class SolutionSuggestRequest(StrictModel):
         return self
 
 
-@app.post("/api/solutions/{solution_id}/suggest-schema")
-def suggest_with_solution(solution_id: str, request: SolutionSuggestRequest):
-    """A solution's own schema suggestion (synchronous; independent of the interactive model lock)."""
+@app.post("/api/solutions/{solution_id}/suggest-schema", openapi_extra={"requestBody": {
+    "required": True, "content": {"application/json": {"schema": SolutionSuggestRequest.model_json_schema()}}}})
+def suggest_with_solution(solution_id: str, body: Any = Body(default=None)):
+    """A solution's own schema suggestion (synchronous; independent of the interactive model lock).
+
+    The body is validated after the solution checks, so an unknown solution is 404 and an unsupported one
+    gives its reason, whatever the body."""
     solution = solution_or_404(solution_id)
     if solution.schema_suggestion_method is None:
         raise HTTPException(422, solution.schema_suggestion_unsupported)
+    try:
+        request = SolutionSuggestRequest.model_validate(body)
+    except ValidationError as error:
+        raise RequestValidationError([{**item, "loc": ("body", *item["loc"])}
+                                      for item in error.errors(include_url=False)]) from error
     status = solution.status()
     if not status.get("ready"):
         raise HTTPException(503, status.get("detail") or f"{solution.name} is not ready.")

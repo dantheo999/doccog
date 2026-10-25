@@ -174,6 +174,11 @@ def recipe() -> Recipe:
     ([["a", "b"], "c"], ("text", True)),
     (["Chair", "2019-10-22"], ("text", False)),
     ([None, ""], ("text", False)),
+    (["4.1", "4.10", "5"], ("verbatim", False)),  # item numbers: 4.10 is not the number 4.1
+    (["007", "012"], ("verbatim", False)),  # references keep their leading zeros
+    (["4.1.2", 5], ("verbatim", False)),
+    (["0", "0.5", "-3", 2.25], ("number", False)),
+    (["12.3.2019", "1 December 2019"], ("date", False)),
 ])
 def test_attribute_types_are_inferred_from_values(values, expected):
     assert infer_type(values) == expected
@@ -297,7 +302,8 @@ def test_nuextract_merges_templates_from_each_exemplar(monkeypatch):
         "present", "apologies"]
     assert fields["meeting_date"].type == "date"  # the first exemplar's type wins
     assert outcome.usage == Usage(calls=2, prompt_tokens=200, completion_tokens=20)
-    assert "2 calls" in outcome.notes[0]
+    assert outcome.notes[0] == ("NuExtract template generation ran once per exemplar (2 exemplars): 2 calls completed; "
+                                "2 templates were merged by name (the first type wins).")
     assert any("meeting_date" in note and "kept date" in note for note in outcome.notes)
     assert [item["document"] for item in outcome.raw["outputs"]] == ["a.txt", "b.txt"]
 
@@ -323,6 +329,9 @@ def test_nuextract_skips_failed_exemplars_and_reports_total_failure(monkeypatch)
     outcome = NuExtractSolution().suggest_schema(docs, "", {}, RunContext(store=store))
     assert [field.name for field in outcome.draft.fields] == ["attendees", "meeting_date"]
     assert any("No template for b.txt: Context too long." in note for note in outcome.notes)
+    assert outcome.usage.calls == 1 and outcome.notes[0] == (
+        "NuExtract template generation ran once per exemplar (2 exemplars): 1 call completed, 1 failed; "
+        "the schema comes from a single template.")
     monkeypatch.setattr(nuextract_module, "engine", fake_engine(errors={"a.txt": error, "b.txt": error}))
     with pytest.raises(ServiceError) as failure:
         NuExtractSolution().suggest_schema(docs, "", {}, RunContext(store=store))
@@ -351,11 +360,36 @@ def test_field_lists_merge_recursively_by_name():
     merged, conflicts = schema_suggest.merge_field_lists(first, other)
     assert merged[0]["array"] and merged[0]["description"] == "Items."
     assert [(child["name"], child["type"]) for child in merged[0]["fields"]] == [("a", "text"), ("b", "text")]
-    assert merged[1]["options"] == ["x", "X", "y"]
+    assert merged[1]["options"] == ["x", "y"]  # case variants are one option (the first spelling is kept)
     assert conflicts == ["items: one exemplar suggested a single value, another a list; kept a list.",
                          "items.a: kept text; another exemplar suggested date."]
     assert first[0]["fields"] == [{"name": "a", "type": "text", "description": "", "array": False,
                                    "options": [], "fields": []}]  # inputs are not mutated
+
+
+def test_case_variant_enum_options_from_two_exemplars_merge(monkeypatch):
+    templates = {"a.txt": {"attendees": [{"name": "verbatim-string", "status": ["Present", "Apologies"]}]},
+                 "b.txt": {"attendees": [{"name": "verbatim-string", "status": ["present", "absent"]}]}}
+    monkeypatch.setattr(nuextract_module, "engine", fake_engine(templates))
+    store, docs = documents()
+    draft = NuExtractSolution().suggest_schema(docs, "", {}, RunContext(store=store)).draft
+    assert draft.fields[0].fields[1].options == ["Present", "Apologies", "absent"]
+    assert schema_suggest.sanitise_fields([{"name": "s", "type": "enum", "options": ["Yes", " yes", "No", ""]}])[0][
+        "options"] == ["Yes", "No"]  # the shared path tolerates case variants from one response too
+
+
+def test_unique_names_stay_within_64_characters():
+    long = "decision_recorded_by_the_board_of_directors_during_the_quarterly_meeting"
+    seen: set[str] = set()
+    names = [schema_suggest.unique_name(schema_suggest.snake_name(f"{long} {suffix}"), seen) for suffix in "ABC"]
+    assert names == [long[:64], long[:62] + "_2", long[:62] + "_3"]
+    assert schema_suggest.unique_name("x" * 63, {"x" * 63, "x" * 62 + "_2"}) == "x" * 62 + "_3"
+    fields, _ = schema_from_recipe(Recipe.model_validate({
+        "id": "r", "version": 1, "instructions": "i", "goal": "g", "source_name": "a.txt", "created_at": "2026-10-25",
+        "examples": [{"text": f"{long} A. {long} B.", "extractions": [
+            {"extraction_class": f"{long} A", "extraction_text": "A"},
+            {"extraction_class": f"{long} B", "extraction_text": "B"}]}]}))
+    assert [field["name"] for field in fields] == [long[:64], long[:62] + "_2"]
 
 
 # --- API -----------------------------------------------------------------------------------
@@ -396,14 +430,17 @@ def test_suggest_schema_endpoint_errors(api, monkeypatch):
     main, client, ids = api
     url = "/api/solutions/{}/suggest-schema"
     assert client.post(url.format("missing"), json={"document_ids": ids}).status_code == 404
+    assert client.post(url.format("missing"), json={}).status_code == 404  # unknown solution before body checks
     monkeypatch.setitem(main.solutions, "unstract", UnstractSolution())
-    unsupported = client.post(url.format("unstract"), json={"document_ids": ids})
-    assert unsupported.status_code == 422
-    assert unsupported.json()["detail"] == UnstractSolution.schema_suggestion_unsupported
+    for body in ({"document_ids": ids}, {"document_ids": []}):
+        unsupported = client.post(url.format("unstract"), json=body)
+        assert unsupported.status_code == 422
+        assert unsupported.json()["detail"] == UnstractSolution.schema_suggestion_unsupported
     monkeypatch.setitem(main.solutions, "suggesting", Suggesting())
     for body in ({"document_ids": []}, {"document_ids": [ids[0], ids[0]]}, {"document_ids": [f"d{index}" for index in range(6)]},
-                 {"document_ids": ids, "guidance": "x" * 4_001}, {"document_ids": ids, "extra": 1}):
-        assert client.post(url.format("suggesting"), json=body).status_code == 422, body
+                 {"document_ids": ids, "guidance": "x" * 4_001}, {"document_ids": ids, "extra": 1}, None, [ids]):
+        invalid = client.post(url.format("suggesting"), json=body)
+        assert invalid.status_code == 422 and invalid.json()["detail"][0]["loc"][0] == "body", body
     monkeypatch.setitem(main.solutions, "suggesting", Suggesting(ready=False))
     down = client.post(url.format("suggesting"), json={"document_ids": ids})
     assert down.status_code == 503 and down.json()["detail"] == "Down for maintenance."

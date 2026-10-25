@@ -74,10 +74,25 @@ def snake_name(name: str) -> str:
 
 
 def unique_name(name: str, seen: set[str]) -> str:
+    """`name`, or `name_2`, `name_3`... (truncated to stay within 64 characters) when already in `seen`."""
+    base, counter = name, 2
     while name in seen:
-        name = f"{name}_2"[:64]
+        suffix = f"_{counter}"
+        name = base[:64 - len(suffix)].rstrip("_") + suffix
+        counter += 1
     seen.add(name)
     return name
+
+
+def unique_options(options) -> list[str]:
+    """Stripped, non-empty options without case-insensitive duplicates (first spelling kept), at most 50."""
+    kept, seen = [], set()
+    for option in options:
+        option = str(option).strip()
+        if option and option.casefold() not in seen:
+            seen.add(option.casefold())
+            kept.append(option)
+    return kept[:50]
 
 
 def sanitise_fields(fields: list, level: int = 1) -> list[dict]:
@@ -89,8 +104,7 @@ def sanitise_fields(fields: list, level: int = 1) -> list[dict]:
         name = unique_name(snake_name(item.get("name", "")), seen)
         kind: FieldType = item.get("type") if item.get("type") in LEAF_TYPES + ["object"] else "text"
         children = sanitise_fields(item.get("fields", []), level + 1) if level < 3 else []
-        options = list(dict.fromkeys(str(option).strip() for option in item.get("options", [])
-                                     if str(option).strip()))[:50]
+        options = unique_options(item.get("options") or [])
         if kind == "object" and not children:
             kind = "text"
         if kind == "enum" and not options:
@@ -130,7 +144,7 @@ def merge_field_lists(first: list[dict], other: list[dict], prefix: str = "") ->
         if not current["description"] and field["description"]:
             current["description"] = field["description"]
         if current["type"] == field["type"] == "enum":
-            current["options"] = list(dict.fromkeys(current["options"] + field["options"]))[:50]
+            current["options"] = unique_options(current["options"] + field["options"])
         elif current["type"] == field["type"] == "object":
             current["fields"], nested = merge_field_lists(current["fields"], field["fields"], f"{path}.")
             current["fields"] = current["fields"][:40]

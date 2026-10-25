@@ -13,7 +13,7 @@ import SettingsForm, { settingsErrors } from "./SettingsForm";
 import {
   MAX_EXEMPLARS, MAX_GUIDANCE, SHARED_ID, SHARED_NAME, compareDrafts, formatSeconds, formatTokens,
   formatWhen, loadSuggestionSettings, loadWorkspaceDraft, sameDraft, schemaDepth, storeSuggestionSettings,
-  storeWorkspaceDraft, totalFields, typeLabel,
+  storeWorkspaceDraft, totalFields, typeLabel, whenLabels,
 } from "./schemaSuggestionModel";
 import type { ComparisonRow } from "./schemaSuggestionModel";
 
@@ -72,6 +72,8 @@ export interface SuggestJob {
   finished?: number;
   error?: string;
   fields?: number;
+  /** Shared suggestion only: kept as a card, not loaded, because the editor draft changed while it ran. */
+  kept?: boolean;
 }
 
 function JobStatus({ job, now, doneText }: { job?: SuggestJob; now: number; doneText?: string }) {
@@ -95,16 +97,22 @@ export interface SuggestWithPickerProps {
   onEffortChange: (effort: string) => void;
   settings: Record<string, Record<string, unknown>>;
   onSettingsChange: (solutionId: string, values: Record<string, unknown>) => void;
+  /** Invalid suggestion settings per chosen solution; Suggest stays disabled while any are listed. */
+  errors?: Record<string, string[]>;
+  /** Scroll to the schema editor (offered once the shared draft has loaded into it). */
+  onShowEditor?: () => void;
 }
 
 /** The shared suggestion first (the default), then every solution that can suggest; the rest disabled with reasons. */
 export function SuggestWithPicker({ solutions, selected, onSelectedChange, jobs, effort, onEffortChange, settings,
-  onSettingsChange }: SuggestWithPickerProps) {
+  onSettingsChange, errors = {}, onShowEditor }: SuggestWithPickerProps) {
   const now = useNow(Object.values(jobs).some(job => job.status === "running"));
   const toggle = (id: string) => onSelectedChange(selected.includes(id) ? selected.filter(item => item !== id) : [...selected, id]);
   const capable = solutions.filter(item => item.schema_suggestion?.supported);
   const incapable = solutions.filter(item => item.schema_suggestion && !item.schema_suggestion.supported);
   const sharedOn = selected.includes(SHARED_ID);
+  const sharedJob = jobs[SHARED_ID];
+  const sharedLoaded = sharedJob?.status === "done" && !sharedJob.kept;
 
   return <fieldset className="suggest-with">
     <legend className="field-label">Suggest with</legend>
@@ -115,7 +123,9 @@ export function SuggestWithPicker({ solutions, selected, onSelectedChange, jobs,
         <label htmlFor="suggest-with-shared">{SHARED_NAME}</label><span className="pill">default</span>
         <p id="suggest-with-shared-help" className="microcopy">Solution-neutral: one Azure OpenAI call reads the exemplars' full
           text and proposes a schema. Its draft loads into the editor below.</p>
-        <JobStatus job={jobs[SHARED_ID]} now={now} doneText="Loaded into the editor" />
+        <JobStatus job={sharedJob} now={now}
+          doneText={sharedJob?.kept ? "Kept under Suggestions; the editor draft changed while it ran" : "Loaded into the editor"} />
+        {sharedLoaded && onShowEditor && <button type="button" className="text-button show-editor" onClick={onShowEditor}>Show in editor</button>}
       </div>
       <label className="inline-select"><span>Reasoning</span>
         <select aria-label="Shared suggestion reasoning effort" value={effort} onChange={event => onEffortChange(event.target.value)}>
@@ -126,6 +136,7 @@ export function SuggestWithPicker({ solutions, selected, onSelectedChange, jobs,
       const on = selected.includes(solution.id);
       const specs = solution.schema_suggestion?.settings ?? [];
       const ready = solution.status.ready;
+      const problems = on && ready ? errors[solution.id] ?? [] : [];
       return <div key={solution.id} className={`suggest-option ${on ? "selected" : ""} ${ready ? "" : "disabled"}`}
         style={{ "--suggest-accent": solution.accent } as CSSProperties}>
         <input id={id} type="checkbox" checked={on && ready} disabled={!ready} onChange={() => toggle(solution.id)}
@@ -140,6 +151,8 @@ export function SuggestWithPicker({ solutions, selected, onSelectedChange, jobs,
             <SuggestionSettings specs={specs} idPrefix={`ws-${solution.id}-`} values={settings[solution.id] ?? {}}
               onChange={values => onSettingsChange(solution.id, values)} />
           </details>}
+          {problems.length > 0 && <ul className="suggest-option-errors" aria-label={`${solution.name} suggestion settings errors`}>
+            {problems.map(item => <li key={item}>{item}</li>)}</ul>}
         </div>
       </div>;
     })}
@@ -160,6 +173,8 @@ export function SuggestWithPicker({ solutions, selected, onSelectedChange, jobs,
 
 interface CardProps {
   suggestion: SchemaSuggestion;
+  /** When it ran, unique among suggestions from the same solution (see whenLabels). */
+  when: string;
   accent: string;
   inEditor: boolean;
   compared: boolean;
@@ -168,9 +183,8 @@ interface CardProps {
   onDelete: () => void;
 }
 
-function SuggestionCard({ suggestion, accent, inEditor, compared, onCompare, onUse, onDelete }: CardProps) {
+function SuggestionCard({ suggestion, when, accent, inEditor, compared, onCompare, onUse, onDelete }: CardProps) {
   const fields = suggestion.draft?.fields ?? [];
-  const when = formatWhen(suggestion.created_at);
   const settings = Object.entries(suggestion.settings ?? {});
   const notes = suggestion.notes ?? [];
   return <article className={`suggestion-card ${compared ? "compared" : ""}`} aria-label={`${suggestion.solution_name}, ${when}`}
@@ -222,6 +236,7 @@ export function SuggestionsSection({ suggestions, solutions, draft, compare, onC
   const compared = compare.map(id => suggestions.find(item => item.id === id)).filter((item): item is SchemaSuggestion => !!item);
   const accent = (suggestion: SchemaSuggestion) => suggestion.solution === SHARED_ID ? SHARED_ACCENT
     : solutions.find(item => item.id === suggestion.solution)?.accent ?? "#5a6b88";
+  const when = useMemo(() => whenLabels(suggestions), [suggestions]);
 
   return <section className="suggestions" aria-labelledby="suggestions-heading">
     <div className="suggestions-heading">
@@ -233,7 +248,7 @@ export function SuggestionsSection({ suggestions, solutions, draft, compare, onC
       {compare.length > 0 && <button className="text-button" onClick={() => onCompareChange([])}>Clear comparison</button>}
     </div>
     {suggestions.length > 0 && <div className="suggestion-grid">
-      {visible.map(suggestion => <SuggestionCard key={suggestion.id} suggestion={suggestion} accent={accent(suggestion)}
+      {visible.map(suggestion => <SuggestionCard key={suggestion.id} suggestion={suggestion} when={when[suggestion.id]} accent={accent(suggestion)}
         inEditor={!!draft && sameDraft(draft, suggestion.draft)} compared={compare.includes(suggestion.id)}
         onCompare={on => onCompareChange(on ? [...compare.filter(id => id !== suggestion.id), suggestion.id] : compare.filter(id => id !== suggestion.id))}
         onUse={() => onUse(suggestion)} onDelete={() => onDelete(suggestion)} />)}
@@ -241,7 +256,7 @@ export function SuggestionsSection({ suggestions, solutions, draft, compare, onC
     {suggestions.length > VISIBLE_CARDS && <button className="text-button show-all" onClick={() => setShowAll(value => !value)}>
       {showAll ? "Show fewer" : `Show all ${suggestions.length} suggestions`}</button>}
     {compared.length === 1 && <p className="microcopy compare-hint"><GitCompareArrows size={12} />Tick one more suggestion to compare.</p>}
-    {compared.length >= 2 && <SuggestionComparison suggestions={compared} />}
+    {compared.length >= 2 && <SuggestionComparison suggestions={compared} when={when} />}
   </section>;
 }
 
@@ -252,15 +267,20 @@ function statusText(row: ComparisonRow, names: string[]): string {
   return "Same";
 }
 
-/** Rows = union of field paths; columns = suggestions; flags fields only one has and fields whose types differ. */
-export function SuggestionComparison({ suggestions }: { suggestions: SchemaSuggestion[] }) {
+/**
+ * Rows = union of field paths; columns = suggestions; flags fields only one has and fields whose types differ.
+ * `when` (from whenLabels over all listed suggestions) keeps column names in step with the cards.
+ */
+export function SuggestionComparison({ suggestions, when: givenWhen }: { suggestions: SchemaSuggestion[]; when?: Record<string, string> }) {
   const [onlyDifferences, setOnlyDifferences] = useState(false);
   const headingId = useId();
   const rows = useMemo(() => compareDrafts(suggestions.map(item => item.draft)), [suggestions]);
   const counts = { unique: rows.filter(row => row.status === "unique").length, differs: rows.filter(row => row.status === "differs").length };
   const shown = onlyDifferences ? rows.filter(row => row.status !== "same") : rows;
   const repeated = (name: string) => suggestions.filter(item => item.solution_name === name).length > 1;
-  const names = suggestions.map(item => repeated(item.solution_name) ? `${item.solution_name} (${formatWhen(item.created_at)})` : item.solution_name);
+  const when = useMemo(() => givenWhen ?? whenLabels(suggestions), [givenWhen, suggestions]);
+  const names = suggestions.map(item => repeated(item.solution_name)
+    ? `${item.solution_name} (${when[item.id] ?? formatWhen(item.created_at)})` : item.solution_name);
 
   return <div className="suggestion-compare" role="region" aria-labelledby={headingId}>
     <div className="suggestion-compare-heading">
@@ -323,6 +343,7 @@ function SupportedSuggestPanel({ solution, method, specs }: { solution: Solution
   const [error, setError] = useState<string | null>(null);
   const now = useNow(started !== null);
   const errors = settingsErrors(specs, settings);
+  const recentWhen = useMemo(() => whenLabels(recent), [recent]);
 
   useEffect(() => { storeSuggestionSettings(solution.id, settings); }, [solution.id, settings]);
   useEffect(() => {
@@ -408,8 +429,8 @@ function SupportedSuggestPanel({ solution, method, specs }: { solution: Solution
         <summary>Earlier {solution.name} suggestions ({recent.length})</summary>
         <ul>{recent.slice(0, 8).map(item => <li key={item.id}>
           <button className={`text-button ${result?.id === item.id ? "active" : ""}`} onClick={() => setResult(item)}
-            aria-label={`View ${solution.name} suggestion from ${formatWhen(item.created_at)}`}>
-            {formatWhen(item.created_at)}</button>
+            aria-label={`View ${solution.name} suggestion from ${recentWhen[item.id]}`}>
+            {recentWhen[item.id]}</button>
           <small>{item.draft.fields.length} fields · {item.exemplars.length} exemplar{item.exemplars.length === 1 ? "" : "s"}</small>
         </li>)}</ul>
       </details>}

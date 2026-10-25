@@ -99,7 +99,7 @@ class NuExtractSolution(Solution):
         options = self.resolve_suggestion_settings(settings)
         fields: list[dict] = []
         notes, conflicts, outputs, errors = [], [], [], []
-        usage = Usage()
+        usage, merged = Usage(), 0
         for document in documents:
             context.check()
             try:
@@ -123,13 +123,17 @@ class NuExtractSolution(Solution):
                 continue
             fields, found = merge_field_lists(fields, proposed)
             conflicts += found
+            merged += 1
         if not fields:
             if errors:
                 raise ServiceError(str(errors[0]), ERROR_STATUS.get(errors[0].kind, 502))
             raise ServiceError("NuExtract did not return a usable template for any exemplar.")
-        calls = len(documents)
-        summary = (f"NuExtract template generation ran once per exemplar ({calls} call{'s' if calls != 1 else ''})"
-                   + ("; the field lists were merged by name (the first type wins)." if usage.calls > 1 else "."))
+        def count(number: int, word: str) -> str:
+            return f"{number} {word}{'' if number == 1 else 's'}"
+        summary = (f"NuExtract template generation ran once per exemplar ({count(len(documents), 'exemplar')}): "
+                   f"{count(usage.calls, 'call')} completed" + (f", {len(errors)} failed" if errors else "") + "; "
+                   + (f"{merged} templates were merged by name (the first type wins)." if merged > 1
+                      else "the schema comes from a single template."))
         notes = [summary] + [f"Conflict at {conflict}" for conflict in conflicts[:15]] + notes
         draft = build_draft("NuExtract3 template schema",
                             f"Merged from NuExtract3 templates for: {', '.join(d.name for d in documents)}.",

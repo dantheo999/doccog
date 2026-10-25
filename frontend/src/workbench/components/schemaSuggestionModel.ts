@@ -49,12 +49,40 @@ export function formatTokens(usage: Partial<Usage> | null | undefined): string {
 
 export function formatSeconds(seconds: number | null | undefined): string {
   if (typeof seconds !== "number" || !Number.isFinite(seconds)) return "—";
-  return seconds < 90 ? `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s` : `${Math.floor(seconds / 60)} min ${Math.round(seconds % 60)} s`;
+  if (seconds < 10) return `${seconds.toFixed(1)} s`;
+  const total = Math.round(seconds); // round once, so 119.6 s reads "2 min 0 s", not "1 min 60 s"
+  return total < 90 ? `${total} s` : `${Math.floor(total / 60)} min ${total % 60} s`;
 }
 
-export function formatWhen(iso: string): string {
+export function formatWhen(iso: string, withSeconds = false): string {
   const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? iso : date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return Number.isNaN(date.getTime()) ? iso
+    : date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: withSeconds ? "medium" : "short" });
+}
+
+/**
+ * When each suggestion ran (by id), precise enough to tell apart suggestions from the same solution: to the
+ * minute, to the second when two share a minute, then numbered in creation order when they share a second.
+ */
+export function whenLabels(suggestions: SchemaSuggestion[]): Record<string, string> {
+  const clashes = (key: (item: SchemaSuggestion) => string) => {
+    const counts = new Map<string, number>();
+    for (const item of suggestions) counts.set(key(item), (counts.get(key(item)) ?? 0) + 1);
+    return (item: SchemaSuggestion) => (counts.get(key(item)) ?? 0) > 1;
+  };
+  const sameMinute = clashes(item => `${item.solution_name}\u0000${formatWhen(item.created_at)}`);
+  const precise = (item: SchemaSuggestion) => formatWhen(item.created_at, sameMinute(item));
+  const sameSecond = clashes(item => `${item.solution_name}\u0000${precise(item)}`);
+  const ordinals = new Map<string, number>();
+  const labels: Record<string, string> = {};
+  for (const item of [...suggestions].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))) {
+    const text = precise(item);
+    if (!sameSecond(item)) { labels[item.id] = text; continue; }
+    const key = `${item.solution_name}\u0000${text}`;
+    ordinals.set(key, (ordinals.get(key) ?? 0) + 1);
+    labels[item.id] = `${text} #${ordinals.get(key)}`;
+  }
+  return labels;
 }
 
 export function sameDraft(a: SchemaDraft | null | undefined, b: SchemaDraft | null | undefined): boolean {
@@ -91,12 +119,23 @@ export function suggestionSpecs(solution: SolutionInfo): SettingSpec[] {
   return solution.schema_suggestion?.settings ?? [];
 }
 
+/** Whether a stored value has the spec's type (a cleared number field is stored as null, from NaN). */
+function storedValueFits(spec: SettingSpec, value: unknown): boolean {
+  switch (spec.type) {
+    case "boolean": return typeof value === "boolean";
+    case "integer": case "number": return typeof value === "number" && Number.isFinite(value);
+    case "select": return typeof value === "string" && (!spec.options || spec.options.includes(value));
+    default: return typeof value === "string";
+  }
+}
+
 export function loadSuggestionSettings(solution: SolutionInfo): Record<string, unknown> {
-  const base = defaults(suggestionSpecs(solution));
+  const specs = suggestionSpecs(solution);
+  const base = defaults(specs);
   try {
     const stored = JSON.parse(localStorage.getItem(settingsKey(solution.id)) ?? "{}");
     if (!stored || typeof stored !== "object") return base;
-    return Object.fromEntries(Object.entries(base).map(([key, value]) => [key, key in stored ? stored[key] : value]));
+    return Object.fromEntries(specs.map(spec => [spec.key, storedValueFits(spec, stored[spec.key]) ? stored[spec.key] : base[spec.key]]));
   } catch { return base; }
 }
 
@@ -172,7 +211,9 @@ export function compareDrafts(drafts: SchemaDraft[]): ComparisonRow[] {
       const key = keyPrefix + node.name;
       const path = pathPrefix + node.name;
       rows.push({ key, path, parent: pathPrefix, name: node.name, depth, cells: node.cells, present: present.length, status });
-      flatten(node.children, `${key}.`, `${path}${present[0]?.array ? "[]" : ""}.`, depth + 1);
+      // Children only exist under object cells, so their list marker comes from those; "[?]" when they disagree.
+      const lists = new Set(present.filter(field => field.type === "object").map(field => field.array));
+      flatten(node.children, `${key}.`, `${path}${lists.size > 1 ? "[?]" : lists.has(true) ? "[]" : ""}.`, depth + 1);
     }
   };
   flatten(root, "", "", 1);
