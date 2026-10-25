@@ -3,12 +3,13 @@
 Without ground truth, agreement is measured against a chosen reference run, or against the other
 runs (consensus). Cells where every compared value is empty are excluded from scores.
 """
+from functools import lru_cache
 from statistics import mean
 
 from pydantic import JsonValue
 from rapidfuzz import fuzz
 
-from app.grounding import normalise
+from app.grounding import TRANSLATE
 from app.results import FieldValue, Run
 from app.schema import SchemaField, is_empty, parse_date
 
@@ -17,8 +18,17 @@ MATCH = 0.8          # similarity counted as agreement in summaries
 PAIR_THRESHOLD = 0.5  # minimum similarity to align two list items
 
 
+TYPOGRAPHY = str.maketrans(TRANSLATE)
+
+
+@lru_cache(maxsize=65_536)
+def _normalised(value: str) -> str:
+    """Case, quote/dash and whitespace insensitive form (same rules as the grounder, no offset map)."""
+    return " ".join(value.translate(TYPOGRAPHY).lower().split())
+
+
 def _text(value) -> str:
-    return normalise(str(value))[0].strip()
+    return _normalised(str(value))
 
 
 def scalar_similarity(a: JsonValue, b: JsonValue, field: SchemaField) -> float:
