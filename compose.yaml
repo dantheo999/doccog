@@ -1,4 +1,4 @@
-name: doc-cognition-langextract
+name: doc-cognition-workbench
 
 services:
   backend:
@@ -7,29 +7,65 @@ services:
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
       AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      NUEXTRACT_BASE_URL: ${NUEXTRACT_BASE_URL:-http://nuextract:8080/v1}
+      NUEXTRACT_MODEL: ${NUEXTRACT_MODEL:-numind/NuExtract3}
+      UNSTRACT_UI_URL: ${UNSTRACT_UI_URL:-}
+      UNSTRACT_API_URL: ${UNSTRACT_API_URL:-}
+      UNSTRACT_API_KEY: ${UNSTRACT_API_KEY:-}
     expose:
       - "8000"
+    # Lets the backend reach an Unstract platform running on the Docker host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - workbench-data:/data
     init: true
     read_only: true
     tmpfs:
-      - /tmp:size=128m
+      - /tmp:size=256m
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
-    mem_limit: 1g
+    mem_limit: 2g
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
       interval: 15s
       timeout: 6s
       retries: 3
       start_period: 20s
+
+  # NuExtract3 on CPU via llama.cpp. The ~2.7 GB GGUF downloads into the model volume on first start.
+  # For a GPU, see compose.gpu.yaml (vLLM).
+  nuextract:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    command: ["-hf", "numind/NuExtract3-GGUF:Q4_K_M", "--jinja", "-c", "32768", "-np", "1",
+              "--host", "0.0.0.0", "--port", "8080"]
+    environment:
+      LLAMA_CACHE: /models
+    volumes:
+      - nuextract-models:/models
+    expose:
+      - "8080"
+    init: true
+    mem_limit: ${NUEXTRACT_MEM_LIMIT:-8g}
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15m
+
   frontend:
     build: ./frontend
     ports:
-      - "127.0.0.1:${HOST_PORT:-8080}:80"
+      - "127.0.0.1:${HOST_PORT:-8088}:80"
     depends_on:
       backend:
         condition: service_healthy
     init: true
     mem_limit: 128m
+
+volumes:
+  workbench-data:
+  nuextract-models:

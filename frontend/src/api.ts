@@ -34,21 +34,21 @@ export const api = {
     body.append("file", file);
     return request<DocumentPreview>("/documents", { method: "POST", body });
   },
-  generate: async (document_ids: string[], goal: string): Promise<Recipe> => {
+  generate: async (document_ids: string[], goal: string, schema_id?: string): Promise<Recipe> => {
     const recipe = await request<unknown>("/recipes/generate", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ document_ids, goal }),
+      body: JSON.stringify(schema_id ? { document_ids, goal, schema_id } : { document_ids, goal }),
     });
     return parseRecipe(JSON.stringify(recipe));
   },
-  extract: (document_id: string, recipe: Recipe, options: ExtractionOptions) => request<ExtractionResult>("/extractions", {
+  extract: (document_id: string, recipe: Recipe, options: ExtractionOptions, schema_id?: string) => request<ExtractionResult>("/extractions", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ document_id, recipe, options }),
+    body: JSON.stringify(schema_id ? { document_id, recipe, options, schema_id } : { document_id, recipe, options }),
   }),
-  optimize: async (document_id: string, recipe: Recipe, result: ExtractionResult) => {
+  optimize: async (document_id: string, recipe: Recipe, result: ExtractionResult, schema_id?: string) => {
     const proposal = parseOptimizationProposal(await request<unknown>("/recipes/optimize", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ document_id, recipe, result }),
+      body: JSON.stringify(schema_id ? { document_id, recipe, result, schema_id } : { document_id, recipe, result }),
     }));
     assertOptimizationBase(proposal, recipe);
     return proposal;

@@ -1,5 +1,5 @@
 import hashlib
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints, model_validator
 from pydantic_core import PydanticCustomError
@@ -75,6 +75,7 @@ class GenerateRequest(StrictModel):
     document_id: NonEmpty | None = None
     document_ids: list[NonEmpty] | None = Field(default=None, min_length=1, max_length=5)
     goal: Annotated[NonEmpty, Field(max_length=4_000)]
+    schema_id: str | None = Field(default=None, max_length=100)
 
     @model_validator(mode="after")
     def check_sources(self):
@@ -114,10 +115,15 @@ class ExtractionOptions(StrictModel):
     context_window_chars: int = Field(default=0, ge=0, le=6000, strict=True)
 
 
+ReasoningEffort = Literal["none", "low", "medium", "high"]
+
+
 class ExtractRequest(StrictModel):
     document_id: NonEmpty
     recipe: Recipe
     options: ExtractionOptions = Field(default_factory=ExtractionOptions)
+    schema_id: str | None = Field(default=None, max_length=100)
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class ExtractionItem(StrictModel):
@@ -139,12 +145,14 @@ class ExtractionResult(StrictModel):
     extractions: list[ExtractionItem]
     elapsed_seconds: float
     options: ExtractionOptions
+    usage: dict[str, int] | None = None
 
 
 class OptimizeRequest(StrictModel):
     document_id: NonEmpty
     recipe: Recipe
     result: ExtractionResult
+    schema_id: str | None = Field(default=None, max_length=100)
 
 
 class OptimizationProposal(StrictModel):

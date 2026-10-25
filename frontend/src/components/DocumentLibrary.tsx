@@ -44,15 +44,16 @@ export default function DocumentLibrary({ documents, filteredDocuments, folder, 
       {documents.length === 0 ? <div className="empty sidebar-empty"><FolderOpen size={32} /><p>Your documents,<br />one folder away.</p>
         <span>Choose a local folder to begin.</span></div> : filteredDocuments.map(document => {
         const checked = exemplarPaths.includes(document.path);
-        const extension = document.file.name.split(".").pop()?.toUpperCase();
+        const extension = document.name.split(".").pop()?.toUpperCase();
         return <div key={document.path} className="document-row">
           <input type="checkbox" className="exemplar-checkbox" aria-label={`Use ${document.path} as exemplar`}
             aria-describedby="exemplar-help" title={`Use ${document.path} as exemplar`} checked={checked}
             disabled={busy || (!checked && exemplarPaths.length >= 5)} onChange={() => onExemplar(document.path)} />
           <button className={`document-item ${selectedPath === document.path ? "active" : ""}`}
             disabled={busy} onClick={() => onPreview(document)} title={document.path} aria-pressed={selectedPath === document.path}>
-            <FileText size={19} /><span><strong>{document.file.name}</strong><small>{extension} · {(document.file.size / 1024).toFixed(1)} KB</small>
-              {document.path !== document.file.name && <small className="relative-path">{document.path}</small>}</span>
+            <FileText size={19} /><span><strong>{document.name}</strong><small>{extension} · {document.storedId
+                ? `${document.size.toLocaleString()} chars · processed` : `${(document.size / 1024).toFixed(1)} KB`}</small>
+              {document.path !== document.name && <small className="relative-path">{document.path}</small>}</span>
             {selectedPath === document.path && <ChevronRight size={14} />}
           </button>
         </div>;

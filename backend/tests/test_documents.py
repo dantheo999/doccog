@@ -87,20 +87,42 @@ def test_rejects_text_over_limit():
         parse_document("large.txt", b"a" * 500_001)
 
 
-def test_store_expires_documents():
-    clock = [0.0]
-    store = DocumentStore(ttl=10, clock=lambda: clock[0])
-    document = store.add(parse_document("note.txt", b"Alice"))
-    assert store.get(document.id).text == "Alice"
-    clock[0] = 11
+def test_store_persists_documents_across_instances(tmp_path):
+    store = DocumentStore(tmp_path)
+    document = store.add(parse_document("note.txt", b"Alice"), b"Alice")
+    reopened = DocumentStore(tmp_path)
+    assert reopened.get(document.id).text == "Alice"
+    assert reopened.get(document.id).sha256 == document.sha256
+    assert reopened.source(document.id) == b"Alice"
+
+
+def test_store_ids_are_content_addressed():
+    store = DocumentStore()
+    first = store.add(parse_document("one.txt", b"Alice"), b"Alice")
+    again = store.add(parse_document("one.txt", b"Alice"), b"Alice")
+    other = store.add(parse_document("two.txt", b"Bob"), b"Bob")
+    assert first.id == again.id != other.id
     with pytest.raises(DocumentError, match="expired"):
-        store.get(document.id)
+        store.get("missing")
 
 
-def test_store_evicts_old_documents_at_capacity():
-    store = DocumentStore(max_documents=1)
-    first = store.add(parse_document("one.txt", b"Alice"))
-    second = store.add(parse_document("two.txt", b"Bob"))
-    assert store.get(second.id).text == "Bob"
-    with pytest.raises(DocumentError):
-        store.get(first.id)
+def test_pdf_records_page_offsets():
+    writer = PdfWriter()
+    for label in (b"First page", b"Second page"):
+        page = writer.add_blank_page(width=400, height=400)
+        font = DictionaryObject({
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        })
+        page[NameObject("/Resources")] = DictionaryObject({
+            NameObject("/Font"): DictionaryObject({NameObject("/F1"): writer._add_object(font)}),
+        })
+        stream = DecodedStreamObject()
+        stream.set_data(b"BT /F1 12 Tf 30 350 Td (" + label + b") Tj ET")
+        page[NameObject("/Contents")] = writer._add_object(stream)
+    buffer = BytesIO()
+    writer.write(buffer)
+    parsed = parse_document("two.pdf", buffer.getvalue())
+    assert parsed.text == "First page\n\nSecond page"
+    assert parsed.page_starts == [0, 12]
