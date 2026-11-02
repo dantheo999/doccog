@@ -16,6 +16,13 @@ describe("source highlighting", () => {
     ]);
   });
 
+  it("starts a segment at every extra cut, such as a page start", () => {
+    expect(buildSegments("Page oneAlice", [{ id: "a", start: 6, end: 13 }], [0, 8, 13, 40])).toEqual([
+      { text: "Page o", ids: [] }, { text: "ne", ids: ["a"] }, { text: "Alice", ids: ["a"] },
+    ]);
+    expect(buildSegments("ab", [], [1]).map(segment => segment.text)).toEqual(["a", "b"]);
+  });
+
   it("ignores invalid and ungrounded intervals", () => {
     expect(buildSegments("Alice", [
       { id: "a", start: null, end: null }, { id: "b", start: 0, end: 9 },

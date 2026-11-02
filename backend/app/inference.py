@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 from typing import Literal
 
 from langextract.core import exceptions
@@ -36,8 +37,17 @@ def output_failure_reason(error: ResolverParsingError) -> Literal["invalid_json"
 
 
 class RetryingOpenAIModel(OpenAILanguageModel):
-    @staticmethod
-    def _response_to_scored_output(response):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._usage_lock = threading.Lock()
+        self.usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+
+    def _response_to_scored_output(self, response):
+        usage = getattr(response, "usage", None)
+        with self._usage_lock:
+            self.usage["calls"] += 1
+            self.usage["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+            self.usage["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
         if response.choices and response.choices[0].finish_reason == "length":
             raise InvalidExtractionOutput("truncated")
         return OpenAILanguageModel._response_to_scored_output(response)

@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
-import App from "./App";
+import App from "./LangExtractStudio";
 
 const storedRecipe = {
   id: "recipe-1", version: 1, goal: "Find people",

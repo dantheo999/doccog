@@ -51,6 +51,8 @@ const recipeStructureSchema = z.object({
   created_at: z.string().max(100),
   source_characters_used: z.number().int().min(0).default(0),
   source_characters_total: z.number().int().min(0).default(0),
+  schema_id: z.string().max(100).nullable().optional(),
+  schema_version: z.number().int().min(1).nullable().optional(),
 }).strict();
 
 export const recipeSchema = recipeStructureSchema.superRefine((recipe, context) => {

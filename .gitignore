@@ -1,2 +1,6 @@
 # Local secrets (see .env.example)
 .env
+# Workbench data (processed documents, schemas, runs)
+data/
+.venv/
+__pycache__/

@@ -5,7 +5,8 @@ import type { optimizationProposalSchema } from "./optimization";
 
 export type Recipe = z.infer<typeof recipeSchema>;
 export type OptimizationProposal = z.infer<typeof optimizationProposalSchema>;
-export interface LocalDocument { file: File; path: string }
+/** A document in the library: a local file to upload, or an already processed workspace document. */
+export interface LocalDocument { file?: File; path: string; name: string; size: number; storedId?: string }
 export interface DocumentPreview {
   id: string;
   name: string;

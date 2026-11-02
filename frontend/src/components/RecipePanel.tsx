@@ -13,6 +13,8 @@ interface Props {
   canGenerate: boolean;
   exemplarNames?: string[];
   previewName?: string;
+  /** The agreed schema the recipe is built from; the goal is then derived from it and `goal` is optional guidance. */
+  schemaLabel?: string;
   onGenerate: () => void;
   onApply: (recipe: Recipe) => void;
   onError: (message: string) => void;
@@ -21,7 +23,7 @@ interface Props {
 type RecipeTab = "instructions" | "examples" | "text";
 
 export default function RecipePanel({ recipe, goal, setGoal, busy, generating, canGenerate, exemplarNames = [],
-  previewName, onGenerate, onApply, onError }: Props) {
+  previewName, schemaLabel, onGenerate, onApply, onError }: Props) {
   const [tab, setTab] = useState<RecipeTab>("instructions");
   const [instructions, setInstructions] = useState("");
   const [examples, setExamples] = useState("");
@@ -93,7 +95,7 @@ export default function RecipePanel({ recipe, goal, setGoal, busy, generating, c
       if (epoch !== importEpoch.current || busyRef.current) return;
       const imported = parseRecipe(text, "import");
       onApply({ ...imported, id: crypto.randomUUID(), version: 1 });
-      setGoal(imported.goal);
+      if (!schemaLabel) setGoal(imported.goal);
     } catch (error) {
       if (epoch !== importEpoch.current || busyRef.current) return;
       const message = errorMessage(error);
@@ -165,12 +167,20 @@ export default function RecipePanel({ recipe, goal, setGoal, busy, generating, c
       <span className={`pill ${recipe ? "success" : ""}`}>{recipe ? "Recipe ready" : "No recipe"}</span>
     </div>
     <div className="task-section">
-      <label className="field-label" htmlFor="goal">What do you want to extract?</label>
-      <textarea id="goal" className="goal-input" value={goal} maxLength={4_000}
-        disabled={busy} onChange={event => setGoal(event.target.value)}
-        placeholder="e.g. Find privacy obligations, named organisations, applicable regulations and retention periods. Include the responsible party for each obligation." />
-      <button className="primary generate-button" disabled={!canGenerate || !goal.trim() || busy} onClick={onGenerate}>
-        <Sparkles size={16} />{generating ? "Generating recipe…" : "Generate example"}
+      {schemaLabel ? <>
+        <p className="microcopy schema-goal">The extraction goal and classes come from the agreed schema <b>{schemaLabel}</b>.</p>
+        <label className="field-label" htmlFor="goal">Extra guidance (optional)</label>
+        <textarea id="goal" className="goal-input" value={goal} maxLength={2_000}
+          disabled={busy} onChange={event => setGoal(event.target.value)}
+          placeholder="e.g. Ignore apologies for absence; treat co-opted members as attendees." />
+      </> : <>
+        <label className="field-label" htmlFor="goal">What do you want to extract?</label>
+        <textarea id="goal" className="goal-input" value={goal} maxLength={4_000}
+          disabled={busy} onChange={event => setGoal(event.target.value)}
+          placeholder="e.g. Find privacy obligations, named organisations, applicable regulations and retention periods. Include the responsible party for each obligation." />
+      </>}
+      <button className="primary generate-button" disabled={!canGenerate || (!schemaLabel && !goal.trim()) || busy} onClick={onGenerate}>
+        <Sparkles size={16} />{generating ? "Generating recipe…" : schemaLabel ? "Generate from schema" : "Generate example"}
       </button>
       <p className="microcopy exemplar-selection" aria-live="polite">
         {exemplarNames.length ? `${exemplarNames.length} exemplar document${exemplarNames.length === 1 ? "" : "s"}: ${exemplarNames.join(", ")}`
@@ -183,7 +193,7 @@ export default function RecipePanel({ recipe, goal, setGoal, busy, generating, c
     </div>
     <div className="recipe-meta">
       <span className="eyebrow">ACTIVE RECIPE</span>
-      {recipe ? <><span>v{recipe.version} · from {recipe.source_name}</span>
+      {recipe ? <><span>v{recipe.version} · from {recipe.source_name}{recipe.schema_version ? ` · schema v${recipe.schema_version}` : ""}</span>
         <p title={recipe.goal}>{recipe.goal}</p>
         {recipe.source_characters_total > recipe.source_characters_used && recipe.source_characters_used > 0 &&
           <p className="sampling-note">This older recipe used {recipe.source_characters_used.toLocaleString()} of {recipe.source_characters_total.toLocaleString()} characters. Regenerate to use whole-document examples.</p>}
