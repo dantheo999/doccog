@@ -56,11 +56,19 @@ class NuExtractSolution(Solution):
     confidence_method = "Geometric mean of the model's token probabilities for each value."
     route = "/apps/nuextract"
     accent = "#72d6bb"
-    document_concurrency = 1
     schema_suggestion_method = (
         "Native template generation: NuExtract3's template-generation mode drafts a JSON extraction template "
         "from each exemplar's text (with the guidance as its description), one call per exemplar since a 4B "
         "model handles one document best; the templates are converted to schema fields and merged by name.")
+
+    @property
+    def document_concurrency(self) -> int:
+        """Documents sent at once: match the model server's parallel slots (llama.cpp -np). 1 suits CPU;
+        a GPU server can take more (NUEXTRACT_PARALLEL, set by the GPU compose overrides)."""
+        try:
+            return min(max(int(os.environ.get("NUEXTRACT_PARALLEL", "1")), 1), 8)
+        except ValueError:
+            return 1
 
     def settings_spec(self) -> list[SettingSpec]:
         return [

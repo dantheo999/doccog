@@ -220,12 +220,23 @@ NuExtract template (`verbatim` → `verbatim-string`, `text` → `string`, dates
 descriptions become its `instructions`. **What gets sent** shows both.
 
 - **Runtime.** The backend talks to any OpenAI-compatible server hosting the model
-  (`NUEXTRACT_BASE_URL`). Compose runs llama.cpp on CPU with the Q4_K_M GGUF; the
-  GPU override uses vLLM:
+  (`NUEXTRACT_BASE_URL`). Compose runs llama.cpp on CPU with the Q4_K_M GGUF. With an
+  NVIDIA GPU, use one of the two overrides:
 
   ```powershell
-  docker compose -f compose.yaml -f compose.gpu.yaml up --build -d   # NVIDIA GPU, untested here
+  # llama.cpp CUDA build: same GGUF (no new download), same log-probabilities, all layers on the GPU
+  docker compose -f compose.yaml -f compose.gpu-llamacpp.yaml up -d
+  # vLLM: full-precision weights, its own batching; untested here
+  docker compose -f compose.yaml -f compose.gpu.yaml up --build -d
   ```
+
+  Check first that containers can see the GPU: `docker run --rm --gpus all ubuntu nvidia-smi`
+  (Docker Desktop needs the WSL2 backend and a current NVIDIA Windows driver; Linux also needs
+  the NVIDIA Container Toolkit). The 4B model fits easily in 24 GB. `NUEXTRACT_PARALLEL` sets how
+  many documents a NuExtract run sends at once (1 on CPU; 2 with the llama.cpp GPU override,
+  which also starts that many server slots; 4 with vLLM). With llama.cpp the context `-c` is
+  shared by the slots, so raise `NUEXTRACT_CTX` with it (32768 × slots). If your display also runs
+  on the card and vLLM runs out of GPU memory at start-up, add `--gpu-memory-utilization 0.85`.
 
   Outside Docker, run llama.cpp yourself and point the backend at it:
 
@@ -262,8 +273,9 @@ descriptions become its `instructions`. **What gets sent** shows both.
   ```
 
   then `wsl --shutdown` and restart Docker Desktop. NuExtract's container needs about 7 GB
-  (`NUEXTRACT_MEM_LIMIT`). If the machine has an NVIDIA GPU, `compose.gpu.yaml` (vLLM) is far
-  faster than any CPU.
+  (`NUEXTRACT_MEM_LIMIT`); more RAM than that does not make it faster (bandwidth, not capacity,
+  limits CPU generation). If the machine has an NVIDIA GPU, a GPU override (above) is far faster
+  than any CPU.
 
 ### Direct LLM
 

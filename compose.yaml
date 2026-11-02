@@ -9,6 +9,8 @@ services:
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       NUEXTRACT_BASE_URL: ${NUEXTRACT_BASE_URL:-http://nuextract:8080/v1}
       NUEXTRACT_MODEL: ${NUEXTRACT_MODEL:-numind/NuExtract3}
+      # Documents NuExtract runs send at once; match the model server's parallel slots (-np). 1 on CPU.
+      NUEXTRACT_PARALLEL: ${NUEXTRACT_PARALLEL:-1}
       UNSTRACT_UI_URL: ${UNSTRACT_UI_URL:-}
       UNSTRACT_API_URL: ${UNSTRACT_API_URL:-}
       UNSTRACT_API_KEY: ${UNSTRACT_API_KEY:-}

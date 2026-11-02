@@ -3,6 +3,11 @@
 # Untested in this prototype's development environment (no GPU there). If vLLM rejects log-probabilities
 # with speculative decoding, remove the --speculative-config pair.
 services:
+  backend:
+    environment:
+      # vLLM batches concurrent requests itself.
+      NUEXTRACT_PARALLEL: ${NUEXTRACT_PARALLEL:-4}
+
   nuextract:
     image: vllm/vllm-openai:latest
     command: ["numind/NuExtract3", "--served-model-name", "numind/NuExtract3", "--trust-remote-code",

@@ -636,3 +636,13 @@ def test_confidences_follow_raw_indices_when_empty_items_are_dropped():
     assert record["venue"]["room"].value is None and record["venue"]["room"].confidence is None
     from app.results import annotate_plain, plain
     assert plain(record) == plain(annotate_plain(data, fields))
+
+
+@pytest.mark.parametrize("value, expected", [(None, 1), ("2", 2), ("0", 1), ("64", 8), ("lots", 1)])
+def test_document_concurrency_follows_the_model_server_slots(monkeypatch, value, expected):
+    from app.solutions.nuextract import NuExtractSolution
+    if value is None:
+        monkeypatch.delenv("NUEXTRACT_PARALLEL", raising=False)
+    else:
+        monkeypatch.setenv("NUEXTRACT_PARALLEL", value)
+    assert NuExtractSolution().document_concurrency == expected
