@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CheckCheck, Download, FileText, FolderOpen, LoaderCircle, Save, Sparkles, Upload, Wand2, X } from "lucide-react";
+import { CheckCheck, Download, FileText, FolderOpen, LoaderCircle, RefreshCw, Save, Sparkles, Upload, Wand2, X } from "lucide-react";
 import { message, workbench } from "../api";
-import type { Collection, SchemaDraft, SchemaSuggestion, SchemaSummary, SolutionInfo, StoredDocument } from "../types";
+import type { Collection, ExtractionSchema, SchemaDraft, SchemaSuggestion, SchemaSummary, SolutionInfo, StoredDocument } from "../types";
 import { useWorkspace } from "../workspace";
 import SchemaEditor, { schemaErrors } from "../components/SchemaEditor";
 import { SuggestWithPicker, SuggestionsSection } from "../components/SchemaSuggestions";
@@ -11,11 +11,20 @@ import {
   MAX_GUIDANCE, SCHEMA_DRAFT_KEY, SHARED_ID, loadSuggestionSettings, loadWorkspaceDraft, normaliseDraft, sameDraft, sharedSuggestion,
   storeSuggestionSettings, suggestionSpecs, suggestionsFor,
 } from "../components/schemaSuggestionModel";
-import { downloadJson } from "../../recipe";
+import { downloadJson, loadRecipe, saveRecipe } from "../../recipe";
+import { api } from "../../api";
+import { recipeMatchesSchema, schemaExemplarIds } from "../../schemaRecipe";
+import type { Recipe } from "../../types";
 
 const SUPPORTED = /\.(pdf|docx|txt|md)$/i;
 
 interface Progress { total: number; done: number; failed: { path: string; error: string }[]; current: string }
+/** The LangExtract recipe build that follows saving the agreed schema. */
+interface RecipeBuild { status: "running" | "error"; message: string }
+
+function storedRecipe(): Recipe | null {
+  try { return loadRecipe(); } catch { return null; }
+}
 
 export default function WorkspacePage() {
   const workspace = useWorkspace();
@@ -52,6 +61,10 @@ export default function WorkspacePage() {
   const previewRequest = useRef(0);
   const collectionRequest = useRef(0);
   const collection = workspace.collection;
+  /** The recipe LangExtract runs use (browser-stored), and the build that refreshes it after a schema save. */
+  const [recipe, setRecipe] = useState<Recipe | null>(storedRecipe);
+  const [recipeBuild, setRecipeBuild] = useState<RecipeBuild | null>(null);
+  const recipeRequest = useRef(0);
 
   useEffect(() => { workbench.collections().then(setCollections).catch(() => setCollections([])); }, [collection?.id]);
   const loadSchemas = useCallback(() => workbench.schemas().then(setSchemas).catch(() => setSchemas([])), []);
@@ -236,8 +249,34 @@ export default function WorkspacePage() {
       setDraft({ name: schema.name, description: schema.description, fields: schema.fields });
       setSaved(`Saved “${schema.name}” as version ${schema.version}. All solutions now extract against it.`);
       void loadSchemas();
+      void buildRecipe(schema);
     } catch (failure) { setError(message(failure)); }
     finally { setBusy(null); }
+  }
+
+  const langExtract = solutions.find(item => item.id === "langextract");
+  const recipeExemplars = workspace.schema ? schemaExemplarIds(workspace.schema, collection, exemplars) : [];
+
+  /** Build the LangExtract recipe for the agreed schema from the same exemplars, so its goal and classes
+   * come from the schema rather than a separately typed prompt. It replaces the recipe LangExtract runs use. */
+  async function buildRecipe(schema: ExtractionSchema) {
+    const request = ++recipeRequest.current;
+    if (!langExtract?.status.ready) { setRecipeBuild(null); return; }
+    const ids = schemaExemplarIds(schema, collection, exemplars);
+    if (!ids.length) {
+      setRecipeBuild({ status: "error", message: "No LangExtract recipe was built: tick exemplar documents, then build it." });
+      return;
+    }
+    setRecipeBuild({ status: "running", message: `Building the LangExtract recipe for v${schema.version} from ${ids.length} exemplar${ids.length === 1 ? "" : "s"}…` });
+    try {
+      const next = await api.generateFromSchema(schema.id, schema.version, ids);
+      if (request !== recipeRequest.current) return;
+      saveRecipe(next);
+      setRecipe(next);
+      setRecipeBuild(null);
+    } catch (failure) {
+      if (request === recipeRequest.current) setRecipeBuild({ status: "error", message: `The LangExtract recipe was not built: ${message(failure)}` });
+    }
   }
 
   /** Make a saved schema the agreed one and load it into the editor. */
@@ -385,6 +424,22 @@ export default function WorkspacePage() {
               {saved && <span className="microcopy success">{saved}</span>}
               {dirty && workspace.schema && <span className="microcopy">Unsaved changes; runs use the saved version.</span>}
             </div>
+            {workspace.schema && langExtract && <div className="recipe-sync" aria-live="polite">
+              {recipeBuild?.status === "running" ? <span className="microcopy"><LoaderCircle size={13} className="spin" />{recipeBuild.message}</span>
+                : <>
+                  <span className={`microcopy ${recipeBuild?.status === "error" ? "failed" : recipeMatchesSchema(recipe, workspace.schema) ? "success" : ""}`}>
+                    {recipeBuild?.status === "error" ? recipeBuild.message
+                      : recipeMatchesSchema(recipe, workspace.schema)
+                        ? <><CheckCheck size={13} />LangExtract recipe built for v{workspace.schema.version} from {recipe!.source_name}.</>
+                        : !langExtract.status.ready ? `LangExtract is not ready (${langExtract.status.detail}), so no recipe was built for this schema.`
+                          : `The LangExtract recipe does not match v${workspace.schema.version} of this schema yet.`}</span>
+                  {langExtract.status.ready && <button className="secondary" disabled={!recipeExemplars.length || busy !== null}
+                    title={recipeExemplars.length ? `Uses ${recipeExemplars.length} exemplar${recipeExemplars.length === 1 ? "" : "s"}: the ticked documents, or those the schema was saved with`
+                      : "Tick exemplar documents to build the recipe from"}
+                    onClick={() => void buildRecipe(workspace.schema!)}><RefreshCw size={14} />
+                    {recipeMatchesSchema(recipe, workspace.schema) ? "Rebuild LangExtract recipe" : "Build LangExtract recipe"}</button>}
+                </>}
+            </div>}
           </> : <div className="wb-empty small"><p>No schema draft. Suggest one from exemplars, start from the meeting-minutes starter or import JSON.</p></div>}
         </section>
       </div>

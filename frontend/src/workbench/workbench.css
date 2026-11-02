@@ -141,6 +141,9 @@ a.primary, a.secondary { text-decoration: none; }
 .schema-errors { margin: 0 16px 10px; padding: 10px 10px 10px 26px; background: #33212b; border: 1px solid #5e393d; border-radius: 7px;
   font-size: 10px; color: #ffb7bb; line-height: 1.7; }
 .save-row { display: flex; align-items: center; gap: 12px; padding: 4px 16px 18px; flex-wrap: wrap; }
+.recipe-sync { display: flex; align-items: center; gap: 12px; padding: 0 16px 18px; flex-wrap: wrap; }
+.recipe-sync .microcopy { display: inline-flex; align-items: center; gap: 6px; }
+.recipe-sync .microcopy.failed { color: #ffb7bb; }
 .preview-drawer { position: fixed; right: 20px; top: 76px; bottom: 20px; width: min(640px, calc(100vw - 40px)); z-index: 30;
   display: flex; flex-direction: column; box-shadow: 0 20px 60px #0009; }
 .preview-text { flex: 1; overflow: auto; margin: 0; padding: 18px; white-space: pre-wrap; font-size: 12px; line-height: 1.8; color: #c4d0e3;

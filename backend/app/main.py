@@ -17,14 +17,15 @@ from app.cognition import CognitionError, extract_document, generate_recipe, opt
 from app.compare import compare_runs
 from app.documents import DocumentError, DocumentStore, MAX_UPLOAD_BYTES, parse_document
 from app.jobs import JobRunner
-from app.models import ExtractRequest, GenerateRequest, OptimizationProposal, OptimizeRequest, Recipe, StrictModel
+from app.models import (ExtractRequest, GenerateRequest, OptimizationProposal, OptimizeRequest, Recipe,
+                        SchemaRecipeRequest, StrictModel)
 from app.results import DocumentResult, ImportedRecord, Run, RunCreate, RunImport, Usage, annotate_plain, finalise
 from app.schema import SchemaDraft, meeting_minutes_schema
 from app.schema_suggest import SHARED_METHOD, suggest_schema
 from app.settings import allowed_hosts, data_dir, load_settings
 from app.solutions import build_registry
 from app.solutions.base import RunContext
-from app.solutions.langextract import class_guide
+from app.solutions.langextract import class_guide, schema_goal
 from app.unstract_export import import_records
 from app.storage import (CollectionCreate, CollectionDocument, CollectionStore, RunStore, SchemaStore, SchemaSuggestion,
                          SuggestionStore, now)
@@ -441,6 +442,21 @@ def generate(request: GenerateRequest):
         raise HTTPException(409, "Another model operation is in progress. Wait for it to finish.")
     try:
         return generate_recipe(documents, request.goal, settings_or_error(), **extra)
+    finally:
+        model_lock.release()
+
+
+@app.post("/api/recipes/from-schema", response_model=Recipe)
+def generate_from_schema(request: SchemaRecipeRequest):
+    """A recipe built for an agreed schema: the goal is derived from the schema and the classes follow its
+    class guide, so the recipe cannot drift from the fields the other solutions extract."""
+    schema = schemas.get(request.schema_id, request.schema_version)
+    documents = [store.get(document_id) for document_id in request.document_ids]
+    if not model_lock.acquire(blocking=False):
+        raise HTTPException(409, "Another model operation is in progress. Wait for it to finish.")
+    try:
+        return generate_recipe(documents, schema_goal(schema, request.guidance), settings_or_error(),
+                               class_guide=class_guide(schema), schema_id=schema.id, schema_version=schema.version)
     finally:
         model_lock.release()
 

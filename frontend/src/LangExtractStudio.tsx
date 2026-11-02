@@ -16,6 +16,7 @@ import OptimizationReview from "./components/OptimizationReview";
 import { assertOptimizationBase } from "./optimization";
 import { workbench } from "./workbench/api";
 import { useOptionalWorkspace } from "./workbench/workspace";
+import { recipeSchemaMismatch } from "./schemaRecipe";
 
 const supported = /\.(pdf|docx|txt|md)$/i;
 
@@ -36,13 +37,16 @@ function initialExtractionOptions(): { options: ExtractionOptions; warning: stri
  * and uses the workspace's processed documents and agreed schema. */
 export default function LangExtractStudio({ embedded = false }: { embedded?: boolean }) {
   const workspace = useOptionalWorkspace();
-  const schemaId = workspace?.schema?.id;
+  const schema = workspace?.schema ?? null;
+  const schemaId = schema?.id;
   const [initial] = useState(initialRecipe);
   const [initialOptions] = useState(initialExtractionOptions);
   const [options, setOptions] = useState<ExtractionOptions>(initialOptions.options);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [recipe, setRecipe] = useState<Recipe | null>(initial.recipe);
-  const [goal, setGoal] = useState(initial.recipe?.goal ?? "");
+  const [goal, setGoal] = useState(initial.recipe?.schema_id ? "" : initial.recipe?.goal ?? "");
+  /** With an agreed schema the goal is derived from it; this only adds optional guidance. */
+  const [guidance, setGuidance] = useState("");
   const [documents, setDocuments] = useState<LocalDocument[]>([]);
   const [folder, setFolder] = useState("");
   const [workspaceCollection, setWorkspaceCollection] = useState<string | null>(null);
@@ -158,7 +162,7 @@ export default function LangExtractStudio({ embedded = false }: { embedded?: boo
   }
 
   async function generate() {
-    if ((!preview && !exemplarPaths.length) || !goal.trim() || busy || review) return;
+    if ((!preview && !exemplarPaths.length) || (!schema && !goal.trim()) || busy || review) return;
     const token = selectionToken.current;
     setBusy("generate");
     setError(null);
@@ -172,7 +176,8 @@ export default function LangExtractStudio({ embedded = false }: { embedded?: boo
           ids.push(source.id);
         }
       } else if (preview) ids.push(preview.id);
-      const next = await api.generate(ids, goal.trim(), schemaId);
+      const next = schema ? await api.generateFromSchema(schema.id, schema.version, ids, guidance.trim())
+        : await api.generate(ids, goal.trim());
       if (token === selectionToken.current) applyRecipe(next);
     } catch (error) { setError(errorMessage(error)); }
     finally { setBusy(null); }
@@ -232,7 +237,7 @@ export default function LangExtractStudio({ embedded = false }: { embedded?: boo
     <header className="app-header">
       {embedded ? <div className="studio-intro"><span className="eyebrow">RECIPE STUDIO</span>
         <p>Teach LangExtract with exemplar documents, test on one document, then run it in batch from <b>Runs</b>.
-          {workspace?.schema ? <> Recipes follow the agreed schema <b>{workspace.schema.name} v{workspace.schema.version}</b>.</>
+          {schema ? <> Recipes are built from the agreed schema <b>{schema.name} v{schema.version}</b>: saving it in Workspace builds one for you.</>
             : " Save an agreed schema in Workspace to align recipe classes with the other solutions."}</p></div>
       : <div className="brand"><div className="brand-mark"><ScanText size={25} /></div>
         <div><h1>Document Cognition<span>STUDIO</span></h1><p>From unstructured text to grounded intelligence</p></div>
@@ -256,6 +261,8 @@ export default function LangExtractStudio({ embedded = false }: { embedded?: boo
         <button aria-label="Dismiss error" onClick={() => setError(null)}><X size={16} /></button></div>}
       {warning && <div className="notice warning"><AlertCircle size={18} /><span>{warning}</span>
         <button aria-label="Dismiss warning" onClick={() => setWarning(null)}><X size={16} /></button></div>}
+      {recipe && recipeSchemaMismatch(recipe, schema) && <div className="notice warning"><AlertCircle size={18} />
+        <span>{recipeSchemaMismatch(recipe, schema)} Generate to rebuild it from the agreed schema.</span></div>}
       {config && !config.configured && <div className="notice setup"><CircleDot size={17} />
         <span>{config.error || "Connect your Azure deployment in the local .env file, then recreate the backend container. Document browsing and recipe import are available now."}</span></div>}
     </div>
@@ -325,7 +332,8 @@ export default function LangExtractStudio({ embedded = false }: { embedded?: boo
               </div>}
         </section>
       </div>
-      <RecipePanel recipe={recipe} goal={goal} setGoal={setGoal} busy={modelBusy}
+      <RecipePanel recipe={recipe} goal={schema ? guidance : goal} setGoal={schema ? setGuidance : setGoal} busy={modelBusy}
+        schemaLabel={schema ? `${schema.name} v${schema.version}` : undefined}
         generating={busy === "generate"} canGenerate={(!!preview || exemplarPaths.length > 0) && !!config?.configured && busy === null && !review}
         exemplarNames={exemplarPaths} previewName={preview?.name}
         onGenerate={() => void generate()} onApply={applyRecipe} onError={setError} />

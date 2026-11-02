@@ -105,8 +105,8 @@ work through all 20 documents on CPU):
    - Optionally tick **Direct LLM**, **NuExtract3** and **LangExtract** under **Suggest with**
      and compare their suggestions with the shared one.
    - **Direct LLM** → **Run on 2 documents**. Open the run, click values to see highlights.
-   - **LangExtract** → Recipe studio: tick one sample as exemplar, **Generate example**; then
-     Batch runs → **Run on 2 documents**.
+   - **LangExtract** → saving the schema already built its recipe from the same exemplars
+     (see the status under the schema editor); go straight to Batch runs → **Run on 2 documents**.
    - **NuExtract3** → **Run on 2 documents** (about a minute per sample on CPU).
    - **Compare** → tick the three runs. Check the scoreboard and the field matrix, then open a
      document to see values side by side.
@@ -116,7 +116,7 @@ work through all 20 documents on CPU):
      suggest, edit and save a schema — or load the **Meeting-minutes starter**. Use **Save as new
      schema** here, so the minutes schema does not become a new version of the samples schema.
    - Run **Direct LLM** (about 2–3 minutes for all 20 at 4 in parallel) and **LangExtract**
-     (generate a recipe from 2 exemplars first; about 2 minutes for all 20).
+     (its recipe is built from your ticked exemplars when you save the schema; about 2 minutes for all 20).
    - Run **NuExtract3** on a few documents first; all 20 can take an hour or more on CPU.
    - **Compare** the runs. Try a reference run vs consensus, sort documents by disagreement,
      and use the source panel to judge disputed values yourself.
@@ -170,7 +170,13 @@ The LangExtract app has two tabs:
 - **Recipe studio** – the original interactive studio (described in detail under
   [LangExtract recipe studio reference](#langextract-recipe-studio-reference)). It now
   uses the workspace's processed documents (or a folder you choose there) and, when an
-  agreed schema exists, generates recipes whose extraction classes follow the schema.
+  agreed schema exists, generates recipes from the schema: the goal is derived from the
+  schema's fields (you can add optional extra guidance) and the classes follow it. A
+  warning shows when the active recipe was built for another schema or version.
+- **Built on schema save** – saving the agreed schema in Workspace also builds the
+  LangExtract recipe from the same exemplars (the ticked documents, or those the schema
+  was saved with) via `POST /api/recipes/from-schema`, so there is no separate recipe prompt
+  to keep in step. **Rebuild LangExtract recipe** under the schema editor repeats it.
 - **Batch runs** – runs the studio's active recipe over workspace documents and maps
   the findings onto the schema for comparison.
 

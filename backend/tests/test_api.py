@@ -168,3 +168,46 @@ def test_recipe_endpoints_document_their_response_models():
     for route, model in (("/api/recipes/generate", "Recipe"), ("/api/recipes/optimize", "OptimizationProposal")):
         response = schema["paths"][route]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
         assert response.get("$ref") == f"#/components/schemas/{model}"
+
+def test_recipe_from_schema_derives_the_goal_and_class_guide_from_the_agreed_schema(monkeypatch):
+    from app.documents import parse_document
+    from app.main import schemas
+    from app.schema import SchemaDraft
+    schema = schemas.save(SchemaDraft.model_validate({
+        "name": "Board minutes", "description": "Governance meetings.",
+        "fields": [{"name": "meeting_date", "type": "date", "description": "Date the meeting was held."},
+                   {"name": "attendees", "type": "object", "array": True, "fields": [
+                       {"name": "name", "type": "verbatim"}, {"name": "role", "type": "text"}]}]}))
+    seen = {}
+
+    def generate(documents, goal, settings, class_guide="", schema_id=None, schema_version=None):
+        seen.update(goal=goal, class_guide=class_guide, names=[document.name for document in documents])
+        return {**extraction_body()["recipe"], "goal": goal, "schema_id": schema_id, "schema_version": schema_version}
+
+    monkeypatch.setattr("app.main.store.get", lambda key: parse_document(key + ".txt", b"Alice signed."))
+    monkeypatch.setattr("app.main.settings_or_error", lambda: None)
+    monkeypatch.setattr("app.main.generate_recipe", generate)
+    response = client.post("/api/recipes/from-schema", json={
+        "schema_id": schema.id, "document_ids": ["a", "b"], "guidance": "Skip apologies."})
+    assert response.status_code == 200
+    assert response.json()["schema_id"] == schema.id and response.json()["schema_version"] == schema.version
+    assert seen["names"] == ["a.txt", "b.txt"]
+    assert 'agreed schema "Board minutes" (Governance meetings)' in seen["goal"]
+    assert "meeting_date (date" in seen["goal"] and "attendees[].role" in seen["goal"]
+    assert seen["goal"].endswith("Additional guidance: Skip apologies.")
+    assert "attendees: one extraction per item" in seen["class_guide"]
+    assert client.post("/api/recipes/from-schema", json={"schema_id": "missing", "document_ids": ["a"]}).status_code == 404
+    for ids in ([], ["a", "a"], ["a", "b", "c", "d", "e", "f"]):
+        assert client.post("/api/recipes/from-schema", json={"schema_id": schema.id, "document_ids": ids}).status_code == 422
+
+
+def test_schema_goal_stays_within_the_recipe_goal_limit():
+    from app.models import Recipe
+    from app.schema import ExtractionSchema
+    from app.solutions.langextract import schema_goal
+    fields = [{"name": f"field_{index}", "type": "text", "description": "x" * 900} for index in range(60)]
+    schema = ExtractionSchema.model_validate({"id": "s", "version": 1, "created_at": "", "name": "Wide",
+                                              "fields": fields})
+    goal = schema_goal(schema)
+    assert len(goal) <= 4_000 and "field_59" in goal
+    Recipe.model_validate({**extraction_body()["recipe"], "goal": goal})

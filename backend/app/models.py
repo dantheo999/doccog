@@ -69,6 +69,9 @@ class Recipe(GeneratedRecipe):
     created_at: str = Field(max_length=100)
     source_characters_used: int = Field(default=0, ge=0)
     source_characters_total: int = Field(default=0, ge=0)
+    # The agreed schema (and version) the recipe was built for; None for goal-only or older recipes.
+    schema_id: str | None = Field(default=None, max_length=100)
+    schema_version: int | None = Field(default=None, ge=1)
 
 
 class GenerateRequest(StrictModel):
@@ -91,6 +94,20 @@ class GenerateRequest(StrictModel):
             return self.document_ids
         assert self.document_id is not None
         return [self.document_id]
+
+
+class SchemaRecipeRequest(StrictModel):
+    """Build a recipe for an agreed schema: the goal is derived from the schema, not typed."""
+    schema_id: Annotated[NonEmpty, Field(max_length=100)]
+    schema_version: int | None = Field(default=None, ge=1)
+    document_ids: list[NonEmpty] = Field(min_length=1, max_length=5)
+    guidance: str = Field(default="", max_length=2_000)
+
+    @model_validator(mode="after")
+    def check_sources(self):
+        if len(set(self.document_ids)) != len(self.document_ids):
+            raise ValueError("Exemplar document IDs must be distinct.")
+        return self
 
 
 class SelectedExample(StrictModel):

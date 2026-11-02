@@ -3,12 +3,13 @@ import type { ReactNode } from "react";
 import { CircleCheck, CircleDashed, Eye, ExternalLink, LoaderCircle, Play, RefreshCw, Square, Trash2 } from "lucide-react";
 import { message, workbench } from "../api";
 import { href, navigate, useRoute } from "../router";
-import type { RunSummary, SolutionInfo } from "../types";
+import type { ExtractionSchema, RunSummary, SolutionInfo } from "../types";
 import { useWorkspace } from "../workspace";
 import SettingsForm, { defaults, settingsErrors, storedValueFits } from "../components/SettingsForm";
 import RunViewer from "../components/RunViewer";
 import LangExtractStudio from "../../LangExtractStudio";
 import { loadRecipe } from "../../recipe";
+import { recipeSchemaMismatch } from "../../schemaRecipe";
 import UnstractPanel from "../components/UnstractPanel";
 import { SolutionSuggestPanel } from "../components/SchemaSuggestions";
 
@@ -57,17 +58,19 @@ export default function SolutionPage({ solution, onRefresh }: Props) {
 }
 
 /** LangExtract runs reuse the recipe that is active in the studio. */
-function recipeRequirement(): { settings?: Record<string, unknown>; problem?: string; label?: string } {
+function recipeRequirement(schema: ExtractionSchema | null): { settings?: Record<string, unknown>; problem?: string; label?: string } {
   try {
     const recipe = loadRecipe();
     if (!recipe) return { problem: "Generate or import a recipe in the Recipe studio first." };
-    return { settings: { recipe }, label: `recipe v${recipe.version} · ${recipe.examples.length} example${recipe.examples.length === 1 ? "" : "s"}` };
+    const label = `recipe v${recipe.version} · ${recipe.examples.length} example${recipe.examples.length === 1 ? "" : "s"}`;
+    const mismatch = recipeSchemaMismatch(recipe, schema);
+    return { settings: { recipe }, label: mismatch ? `${label} · ${mismatch} Rebuild it from Workspace or the Recipe studio.` : label };
   } catch (failure) { return { problem: `The saved recipe is invalid: ${message(failure)}` }; }
 }
 
 interface WorkbenchProps {
   solution: SolutionInfo;
-  extra?: () => { settings?: Record<string, unknown>; problem?: string; label?: string };
+  extra?: (schema: ExtractionSchema | null) => { settings?: Record<string, unknown>; problem?: string; label?: string };
   aside?: ReactNode;
 }
 
@@ -83,7 +86,7 @@ function RunsWorkbench({ solution, extra, aside }: WorkbenchProps) {
   const [busy, setBusy] = useState<"start" | "preview" | "prepare" | null>(null);
   const [prepared, setPrepared] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const requirement = extra?.();
+  const requirement = extra?.(workspace.schema);
   const chosen = useMemo(() => selected ?? documents.map(item => item.id), [selected, documents]);
   const errors = settingsErrors(solution.settings, settings);
   const needsImages = typeof settings.input_mode === "string" && settings.input_mode.includes("image");

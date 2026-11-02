@@ -93,6 +93,15 @@ beforeEach(() => {
         draft: sharedDraft, notes: ["Attendance varies."], document_ids: body.document_ids, exemplars, created_at: "2026-10-25T11:00:00Z" }));
       return Response.json({ draft: sharedDraft, notes: ["Attendance varies."], usage, exemplars, id: "sh1", elapsed_seconds: 12 });
     }
+    if (input === "/api/schemas" && method === "POST")
+      return Response.json({ ...savedSchema, ...body.draft, exemplars: body.exemplars ?? [] });
+    if (input === "/api/recipes/from-schema") {
+      if (gate) await gate;
+      return Response.json({ id: "r1", version: 1, goal: "Extract the fields of the agreed schema", instructions: "Extract in order.",
+        examples: [{ text: "Alice attended.", extractions: [{ extraction_class: "attendees", extraction_text: "Alice", attributes: {} }] }],
+        source_name: "a.txt, b.txt", created_at: "2026-10-25T12:00:00Z", source_characters_used: 15, source_characters_total: 15,
+        schema_id: body.schema_id, schema_version: body.schema_version });
+    }
     const match = /^\/api\/solutions\/(\w+)\/suggest-schema$/.exec(input);
     if (match && method === "POST") {
       if (gate) await gate;
@@ -129,6 +138,24 @@ describe("workspace schema suggestions", () => {
     expect(screen.getByLabelText("Field name attendees.role")).toHaveValue("role");
     // The shared result is also kept as a suggestion card for later comparison.
     expect(await screen.findByRole("article", { name: /^Shared suggestion/ })).toBeInTheDocument();
+  });
+
+  it("builds the LangExtract recipe from the same exemplars when the agreed schema is saved", async () => {
+    let release!: () => void;
+    openWorkspace();
+    fireEvent.click(await screen.findByLabelText("Use minutes/a.txt as exemplar"));
+    fireEvent.click(screen.getByLabelText("Use minutes/b.txt as exemplar"));
+    fireEvent.click(screen.getByRole("button", { name: "Suggest from 2 exemplars" }));
+    expect(await screen.findByLabelText("Field name attendees.role")).toHaveValue("role");
+    gate = new Promise(resolve => { release = resolve; });
+    fireEvent.click(screen.getByRole("button", { name: "Save as agreed schema" }));
+    expect(await screen.findByText(/Building the LangExtract recipe for v1 from 2 exemplars/)).toBeInTheDocument();
+    expect(requests.find(item => item.url === "/api/recipes/from-schema")!.body)
+      .toEqual({ schema_id: "s1", schema_version: 1, document_ids: ["d1", "d2"], guidance: "" });
+    release();
+    expect(await screen.findByText(/LangExtract recipe built for v1 from a.txt, b.txt/)).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem("doc-cognition.recipe.v1")!)).toMatchObject({ id: "r1", schema_id: "s1", schema_version: 1 });
+    expect(screen.getByRole("button", { name: "Rebuild LangExtract recipe" })).toBeEnabled();
   });
 
   it("lists the solutions that can suggest after the shared option and disables the rest with their reason", async () => {

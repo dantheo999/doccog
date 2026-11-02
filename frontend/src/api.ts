@@ -41,6 +41,14 @@ export const api = {
     });
     return parseRecipe(JSON.stringify(recipe));
   },
+  /** A recipe built for an agreed schema: the server derives the goal and classes from the schema. */
+  generateFromSchema: async (schema_id: string, schema_version: number, document_ids: string[], guidance = ""): Promise<Recipe> => {
+    const recipe = await request<unknown>("/recipes/from-schema", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ schema_id, schema_version, document_ids, guidance }),
+    });
+    return parseRecipe(JSON.stringify(recipe));
+  },
   extract: (document_id: string, recipe: Recipe, options: ExtractionOptions, schema_id?: string) => request<ExtractionResult>("/extractions", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(schema_id ? { document_id, recipe, options, schema_id } : { document_id, recipe, options }),

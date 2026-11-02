@@ -10,7 +10,8 @@ from app.documents import ParsedDocument
 from app.grounding import normalise
 from app.models import ExtractionItem, ExtractionOptions, Recipe
 from app.results import Leaf, Usage, plain
-from app.schema import ExtractionSchema, FieldType, SchemaField, TYPE_LABELS, coerce_scalar, is_empty, parse_date
+from app.schema import (ExtractionSchema, FieldType, SchemaField, TYPE_LABELS, coerce_scalar, field_guide, is_empty,
+                        iter_fields, parse_date)
 from app.schema_suggest import build_draft, snake_name, unique_name
 from app.settings import load_settings
 from app.solutions.base import Outcome, RunContext, SettingSpec, Solution, SuggestionOutcome
@@ -239,6 +240,29 @@ def assemble(fields: list[SchemaField], items: list[ExtractionItem]) -> tuple[di
     for name, count in unknown.items():
         notes.append(f"Ignored {count} finding(s) of class '{name}', which is not in the schema.")
     return root, list(dict.fromkeys(notes))
+
+
+# --- Recipe goal from an agreed schema ------------------------------------------------------
+
+MAX_GOAL = 4_000
+
+
+def schema_goal(schema: ExtractionSchema, guidance: str = "") -> str:
+    """The recipe goal for an agreed schema, so the recipe's instructions and examples match the fields
+    every solution extracts (the class guide sent alongside fixes the exact class and attribute names)."""
+    extra = f"\n\nAdditional guidance: {guidance.strip()}" if guidance.strip() else ""
+    head = f"Extract the fields of the agreed schema \"{schema.name}\""
+    if schema.description.strip():
+        head += f" ({schema.description.strip().rstrip('.')})"
+    head += ". Annotate every field the document supports, with the details of each item as attributes."
+    guide = field_guide(schema.fields)
+    goal = f"{head}\nFields:\n{guide}{extra}"
+    if len(goal) > MAX_GOAL:  # long schemas: field names only; the class guide still carries the detail
+        names = ", ".join(path for path, _ in iter_fields(schema.fields))
+        goal = f"{head}\nFields: {names}{extra}"
+    if len(goal) > MAX_GOAL:
+        goal = goal[:MAX_GOAL - 1].rstrip() + "\u2026"
+    return goal
 
 
 # --- Derived schema suggestion: recipe classes and attributes -> schema fields -------------

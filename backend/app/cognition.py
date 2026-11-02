@@ -243,7 +243,8 @@ SCHEMA_CLASSES_RULE = (
 
 
 def generate_recipe(document: ParsedDocument | list[ParsedDocument], goal: str, settings: Settings,
-                    client: OpenAI | None = None, class_guide: str = "") -> Recipe:
+                    client: OpenAI | None = None, class_guide: str = "",
+                    schema_id: str | None = None, schema_version: int | None = None) -> Recipe:
     documents = [document] if isinstance(document, ParsedDocument) else document
     if not 1 <= len(documents) <= 5:
         raise CognitionError("Choose between one and five exemplar documents.", 422)
@@ -276,6 +277,7 @@ def generate_recipe(document: ParsedDocument | list[ParsedDocument], goal: str, 
         created_at=datetime.now(timezone.utc).isoformat(),
         source_characters_used=sum(source["characters_used"] for source in sources),
         source_characters_total=sum(len(source.text) for source in documents),
+        schema_id=schema_id, schema_version=schema_version,
     )
 
 
