@@ -646,3 +646,62 @@ def test_document_concurrency_follows_the_model_server_slots(monkeypatch, value,
     else:
         monkeypatch.setenv("NUEXTRACT_PARALLEL", value)
     assert NuExtractSolution().document_concurrency == expected
+
+
+def _recovery_setup(monkeypatch, failures, available=True):
+    from app.solutions import nuextract
+    calls = []
+
+    def extract(settings, **kwargs):
+        calls.append(kwargs["text"])
+        if failures:
+            raise ne.NuExtractError("Could not connect to the NuExtract server.", kind=failures.pop(0))
+        return "output"
+
+    monkeypatch.setattr(nuextract.engine, "extract", extract)
+    monkeypatch.setattr(nuextract.engine, "server_status", lambda settings: {"available": available})
+    monkeypatch.setattr(nuextract, "RECOVERY_POLL_SECONDS", 0.01)
+    return nuextract, calls
+
+
+def _context():
+    from app.solutions.base import RunContext
+    return RunContext(store=None)
+
+
+def test_a_restarting_server_is_waited_for_and_the_document_retried(monkeypatch):
+    nuextract, calls = _recovery_setup(monkeypatch, ["connection"])
+    notes = []
+    assert nuextract.extract_with_recovery(_context(), notes, text="doc") == "output"
+    assert calls == ["doc", "doc"] and "waited" in notes[0]
+
+
+def test_a_document_that_drops_the_server_twice_fails_with_a_memory_hint(monkeypatch):
+    from app.azure import ServiceError
+    nuextract, calls = _recovery_setup(monkeypatch, ["connection", "connection"])
+    with pytest.raises(ServiceError, match="running out of memory"):
+        nuextract.extract_with_recovery(_context(), [], text="doc")
+    assert len(calls) == 2
+
+
+def test_other_errors_and_a_server_that_stays_down_are_not_retried_forever(monkeypatch):
+    from app.azure import ServiceError
+    nuextract, calls = _recovery_setup(monkeypatch, ["bad_request"])
+    with pytest.raises(ne.NuExtractError):
+        nuextract.extract_with_recovery(_context(), [], text="doc")
+    assert calls == ["doc"]
+    nuextract, calls = _recovery_setup(monkeypatch, ["unavailable"], available=False)
+    monkeypatch.setenv("NUEXTRACT_RECOVERY_WAIT", "0.05")
+    with pytest.raises(ServiceError, match="did not come back within 0.05 s"):
+        nuextract.extract_with_recovery(_context(), [], text="doc")
+    assert calls == ["doc"]
+
+
+def test_cancelling_a_run_stops_the_wait(monkeypatch):
+    from app.azure import ServiceError
+    nuextract, calls = _recovery_setup(monkeypatch, ["connection"], available=False)
+    context = _context()
+    context.cancel.set()
+    with pytest.raises(ServiceError, match="cancelled"):
+        nuextract.extract_with_recovery(context, [], text="doc")
+    assert calls == ["doc"]

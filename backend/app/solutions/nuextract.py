@@ -1,5 +1,6 @@
 """NuExtract3 adapter: schema -> NuExtract template, served locally by llama.cpp (CPU) or vLLM (GPU)."""
 import os
+import time
 
 from app import nuextract_engine as engine
 from app.azure import ServiceError
@@ -18,6 +19,54 @@ def engine_settings() -> engine.NuExtractSettings:
         api_key=os.environ.get("NUEXTRACT_API_KEY", "EMPTY").strip() or "EMPTY",
         timeout=float(os.environ.get("NUEXTRACT_TIMEOUT", "1800")),
     )
+
+
+# A server that drops out (crash, OOM kill, restart) is waited for, then the document is retried once.
+RECOVERABLE = ("connection", "unavailable")
+RECOVERY_POLL_SECONDS = 5.0
+
+
+def recovery_wait_seconds() -> float:
+    try:
+        return max(float(os.environ.get("NUEXTRACT_RECOVERY_WAIT", "600")), 0.0)
+    except ValueError:
+        return 600.0
+
+
+def wait_for_server(context: RunContext, limit: float) -> float | None:
+    """Poll until the model server answers again. Seconds waited, or None if it did not come back
+    within `limit` (or the run was cancelled)."""
+    started = time.monotonic()
+    while time.monotonic() - started < limit:
+        if context.cancel.wait(RECOVERY_POLL_SECONDS):
+            return None
+        if engine.server_status(engine_settings()).get("available"):
+            return time.monotonic() - started
+    return None
+
+
+def extract_with_recovery(context: RunContext, notes: list[str], **kwargs) -> engine.NuExtractOutput:
+    try:
+        return engine.extract(engine_settings(), **kwargs)
+    except engine.NuExtractError as error:
+        if error.kind not in RECOVERABLE:
+            raise
+        limit = recovery_wait_seconds()
+        waited = wait_for_server(context, limit)
+        context.check()
+        if waited is None:
+            raise ServiceError(f"{error} It did not come back within {limit:g} s.", 503) from error
+    notes.append(f"The NuExtract server was unavailable (restarting or loading the model); waited {waited:.0f} s "
+                 "for it and retried.")
+    try:
+        return engine.extract(engine_settings(), **kwargs)
+    except engine.NuExtractError as error:
+        if error.kind not in RECOVERABLE:
+            raise
+        raise ServiceError(
+            f"{error} The server dropped out twice on this document: it may be running out of memory "
+            "(raise NUEXTRACT_MEM_LIMIT or the WSL memory cap, or lower the chunk size). Check "
+            "`docker compose logs nuextract`.", 503) from error
 
 
 ERROR_STATUS = {"invalid_input": 422, "context_length": 413, "timeout": 504, "connection": 503, "unavailable": 503}
@@ -203,8 +252,8 @@ class NuExtractSolution(Solution):
                     notes.append(f"Split into {len(parts)} chunks and merged.")
             for part in parts:
                 context.check()
-                output = engine.extract(engine_settings(), text=part, images=images, template=template,
-                                        instructions=instructions, **options)
+                output = extract_with_recovery(context, notes, text=part, images=images, template=template,
+                                               instructions=instructions, **options)
                 usage = usage.add(Usage(calls=1, prompt_tokens=output.usage.get("prompt_tokens", 0),
                                         completion_tokens=output.usage.get("completion_tokens", 0)))
                 if output.data is None:

@@ -261,6 +261,10 @@ descriptions become its `instructions`. **What gets sent** shows both.
   minutes document; a page image takes about 4 minutes. llama.cpp slows sharply if other
   heavy work shares the cores, so give it dedicated threads (`NUEXTRACT_THREADS`).
   Running all 20 minutes documents is an over-lunch job on CPU and minutes on a GPU.
+- **Server restarts.** If the model server drops out mid-run (crash, out-of-memory kill, restart),
+  the run waits for it to answer again (up to `NUEXTRACT_RECOVERY_WAIT`, 600 s) and retries the
+  document once, with a note in the run. A document that brings the server down twice fails with a
+  memory hint: check `docker inspect --format "{{.State.OOMKilled}}" <nuextract container>`.
 - **Tuning on a desktop CPU (e.g. Core i9-13900K).** Start with `NUEXTRACT_THREADS=8` (one per
   performance core) and compare 16; generation speed is bound mainly by memory bandwidth, so
   more threads stop helping early. With Docker Desktop on Windows, the WSL2 VM caps CPUs and
