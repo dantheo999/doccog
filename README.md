@@ -156,7 +156,12 @@ and llama.cpp as in [NuExtract3](#nuextract3); everything else is the same at <h
    and whether it was located in the text: **exact**, **fuzzy** (case, whitespace,
    quote or minor wording differences) or **not found**. Click a value to jump to
    its highlight, or a highlight to select its value. Run notes flag problems such
-   as values that could not be located.
+   as values that could not be located. For PDFs, **PDF pages** (the default; **Text**
+   switches back) shows the rendered pages with a box over each located value, for every
+   solution: values are located as character offsets in the text, and each offset is mapped
+   to its character's position on the page with pdfium. The Compare source panel has the
+   same switch. Page-image *input* for NuExtract is separate: it changes what the model
+   reads, not how results are shown.
 5. **Compare.** Select runs (normally one per solution, same schema version) and a
    reference: either a run you trust, or **consensus** (each run against the
    others). See [Comparison](#comparison).

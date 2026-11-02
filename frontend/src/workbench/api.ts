@@ -1,6 +1,6 @@
 import type {
   Collection, Comparison, ExtractionSchema, Run, RunSummary, SchemaDraft, SchemaSuggestion, SchemaSummary,
-  SharedSuggestionResult, SolutionInfo, StoredDocument,
+  PageBoxes, SharedSuggestionResult, SolutionInfo, StoredDocument,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -50,6 +50,10 @@ export const workbench = {
     return request<StoredDocument>("/documents", { method: "POST", body });
   },
   document: (id: string) => request<StoredDocument>(`/documents/${id}`),
+  /** Rectangles on the PDF pages for text spans (fractions of each page). */
+  documentBoxes: (id: string, spans: { id: string; start: number; end: number }[]) =>
+    request<PageBoxes>(`/documents/${id}/boxes`, json("POST", { spans })),
+  pageImageUrl: (id: string, page: number) => `/api/documents/${id}/pages/${page}.png`,
 
   schemas: () => request<SchemaSummary[]>("/schemas"),
   schema: (id: string, version?: number) =>

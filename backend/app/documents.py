@@ -187,6 +187,9 @@ class DocumentStore:
         self._cache: OrderedDict[str, ParsedDocument] = OrderedDict()
         self._sources: dict[str, bytes] = {}
         self._lock = threading.Lock()
+        # One render at a time, so concurrent page requests reuse it instead of each rendering every page.
+        self._render_lock = threading.Lock()
+        self._rendered: OrderedDict[tuple[str, int], list[bytes]] = OrderedDict()
 
     def _path(self, document_id: str, suffix: str) -> Path:
         assert self.root is not None
@@ -242,10 +245,22 @@ class DocumentStore:
             return None
 
     def page_images(self, document_id: str, dpi: int = 150) -> list[bytes]:
-        """Rendered PDF pages (cached), for vision-capable solutions."""
+        """Rendered PDF pages (cached), for vision-capable solutions and the page viewer."""
         document = self.get(document_id)
         if not document.name.lower().endswith(".pdf"):
             return []
+        with self._render_lock:
+            if (document_id, dpi) in self._rendered:
+                self._rendered.move_to_end((document_id, dpi))
+                return self._rendered[(document_id, dpi)]
+            images = self._render(document, dpi)
+            self._rendered[(document_id, dpi)] = images
+            while len(self._rendered) > 4:
+                self._rendered.popitem(last=False)
+            return images
+
+    def _render(self, document: ParsedDocument, dpi: int) -> list[bytes]:
+        document_id = document.id
         if self.root is not None:
             folder = self.root / "documents" / f"{document_id}-pages-{dpi}"
             if folder.is_dir():

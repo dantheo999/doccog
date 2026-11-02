@@ -91,6 +91,10 @@ export interface StoredDocument {
   sha256: string;
 }
 
+/** A rectangle on a rendered PDF page, as fractions of the page (top-left origin). */
+export interface PageRect { page: number; x: number; y: number; w: number; h: number }
+export interface PageBoxes { pages: { width: number; height: number }[]; boxes: Record<string, PageRect[]> }
+
 export type Grounding = "exact" | "fuzzy" | "none";
 
 export interface FieldValue {

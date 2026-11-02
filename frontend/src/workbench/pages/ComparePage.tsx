@@ -6,7 +6,8 @@ import {
 } from "lucide-react";
 import { message, workbench } from "../api";
 import { href, navigate, useRoute } from "../router";
-import ValueHighlighter, { confidenceLabel, confidenceTone, formatValue, pathKey } from "../components/ValueHighlighter";
+import { confidenceLabel, confidenceTone, formatValue, pathKey } from "../components/ValueHighlighter";
+import SourceView from "../components/SourceView";
 import { toCsv } from "../csv";
 import type {
   CompareCell, CompareCellValue, CompareRow, CompareRunStats, Comparison, FieldValue, Grounding, Run, RunStatus,
@@ -886,8 +887,7 @@ function SourcePanel({ target, comparison, loaders, onClose }: SourcePanelProps)
             </button></li>;
           })}</ul>}
           <div className="cmp-source-text">
-            <ValueHighlighter text={data.document.text} values={values} selected={selected} onSelect={setPicked}
-              pageStarts={data.document.page_starts} />
+            <SourceView document={data.document} values={values} selected={selected} onSelect={setPicked} />
           </div>
         </>}
   </aside>;

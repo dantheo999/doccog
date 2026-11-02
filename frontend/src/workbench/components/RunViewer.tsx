@@ -3,7 +3,8 @@ import { AlertCircle, Braces, CircleCheck, CircleX, Download, LoaderCircle, Refr
 import { message, workbench } from "../api";
 import type { Run, StoredDocument } from "../types";
 import { downloadJson } from "../../recipe";
-import ValueHighlighter, { confidenceLabel } from "./ValueHighlighter";
+import { confidenceLabel } from "./ValueHighlighter";
+import SourceView from "./SourceView";
 import RecordView from "./RecordView";
 
 const statusIcon = (status: string) => status === "done" ? <CircleCheck size={13} className="ok" />
@@ -99,8 +100,8 @@ export default function RunViewer({ runId, onClose }: { runId: string; onClose: 
         {documentError ? <div className="notice error" role="alert"><AlertCircle size={16} /><span>{documentError}</span>
           <button aria-label="Retry loading the document" title="Retry" onClick={() => setReload(count => count + 1)}>
             <RefreshCw size={14} /></button></div>
-          : shown ? <ValueHighlighter text={shown.text} values={result?.status === "done" ? result.values : []} selected={selected}
-            onSelect={setSelected} pageStarts={shown.page_starts} />
+          : shown ? <SourceView document={shown} values={result?.status === "done" ? result.values : []} selected={selected}
+            onSelect={setSelected} />
             : <p className="microcopy">Loading document…</p>}
       </div>
       <div className="run-record">

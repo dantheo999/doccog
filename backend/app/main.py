@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 
 from fastapi import Body, FastAPI, Form, HTTPException, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import Field, JsonValue, ValidationError, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -17,6 +17,7 @@ from app.cognition import CognitionError, extract_document, generate_recipe, opt
 from app.compare import compare_runs
 from app.documents import DocumentError, DocumentStore, MAX_UPLOAD_BYTES, parse_document
 from app.jobs import JobRunner
+from app.pdf_layout import LayoutCache, span_rects
 from app.models import (ExtractRequest, GenerateRequest, OptimizationProposal, OptimizeRequest, Recipe,
                         SchemaRecipeRequest, StrictModel)
 from app.results import DocumentResult, ImportedRecord, Run, RunCreate, RunImport, Usage, annotate_plain, finalise
@@ -153,6 +154,44 @@ def upload_document(file: UploadFile, collection_id: str | None = Form(default=N
 @app.get("/api/documents/{document_id}")
 def get_document(document_id: str):
     return store.get(document_id).response()
+
+
+VIEW_DPI = 120  # shared with NuExtract's default page-image DPI, so its cached renders are reused
+layouts = LayoutCache()
+
+
+@app.get("/api/documents/{document_id}/pages/{page}.png")
+def page_image(document_id: str, page: int):
+    """A rendered PDF page (0-based), for viewing results on the page."""
+    images = store.page_images(document_id, VIEW_DPI)
+    if not 0 <= page < len(images):
+        raise HTTPException(404, "No such page.")
+    return Response(images[page], media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})
+
+
+class SpanRequest(StrictModel):
+    id: str = Field(max_length=500)
+    start: int = Field(ge=0)
+    end: int = Field(ge=0)
+
+
+class BoxesRequest(StrictModel):
+    spans: list[SpanRequest] = Field(max_length=10_000)
+
+
+@app.post("/api/documents/{document_id}/boxes")
+def document_boxes(document_id: str, request: BoxesRequest):
+    """Rectangles on the PDF pages for text spans (e.g. grounded values), as fractions of each page."""
+    document = store.get(document_id)
+    if not document.name.lower().endswith(".pdf") or not document.pages:
+        raise HTTPException(422, "Only PDFs have pages to show.")
+    content = store.source(document_id)
+    if content is None:
+        raise HTTPException(410, "The original PDF is not stored. Select the document again to view its pages.")
+    pages = layouts.get(document, content)
+    return {"pages": [{"width": round(page.width, 2), "height": round(page.height, 2)} for page in pages],
+            "boxes": {span.id: span_rects(pages, span.start, min(span.end, len(document.text)))
+                      for span in request.spans}}
 
 
 @app.post("/api/collections")
