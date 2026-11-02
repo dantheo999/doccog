@@ -26,6 +26,9 @@ MAX_CHARACTERS = 500_000
 PARSER_VERSION = "2"
 # pdfium marks generated line-end hyphens as \x02; Symbol-font bullets use a private-use code point.
 PDF_TRANSLATION = str.maketrans({"\x02": "-", "\uf0b7": "\u2022", "\uf0a7": "\u25aa", "\x00": ""})
+# pdfium is not thread-safe: concurrent use from FastAPI's worker threads corrupts its heap and
+# aborts the whole process. Every pdfium call must hold this lock.
+PDFIUM_LOCK = threading.Lock()
 
 
 class DocumentError(ValueError):
@@ -64,34 +67,40 @@ def clean_pdf_page(text: str) -> str:
 
 def pdf_page_texts(content: bytes) -> list[str]:
     """Selectable text per page; pdfium keeps words intact where pypdf splits them."""
-    document = pdfium.PdfDocument(content)
-    try:
-        pages = []
-        for page in document:
-            textpage = page.get_textpage()
-            try:
-                pages.append(clean_pdf_page(textpage.get_text_bounded()))
-            finally:
-                textpage.close()
-                page.close()
-        return pages
-    finally:
-        document.close()
+    with PDFIUM_LOCK:
+        document = pdfium.PdfDocument(content)
+        try:
+            pages = []
+            for page in document:
+                textpage = page.get_textpage()
+                try:
+                    pages.append(clean_pdf_page(textpage.get_text_bounded()))
+                finally:
+                    textpage.close()
+                    page.close()
+            return pages
+        finally:
+            document.close()
 
 
 def render_pdf_pages(content: bytes, dpi: int = 150) -> list[bytes]:
-    document = pdfium.PdfDocument(content)
-    try:
-        images = []
-        for page in document:
-            bitmap = page.render(scale=dpi / 72)
-            buffer = BytesIO()
-            bitmap.to_pil().convert("RGB").save(buffer, format="PNG", optimize=True)
-            images.append(buffer.getvalue())
-            page.close()
-        return images
-    finally:
-        document.close()
+    with PDFIUM_LOCK:
+        document = pdfium.PdfDocument(content)
+        try:
+            images = []
+            for page in document:
+                bitmap = page.render(scale=dpi / 72)
+                try:
+                    image = bitmap.to_pil().convert("RGB")
+                finally:
+                    bitmap.close()
+                    page.close()
+                buffer = BytesIO()
+                image.save(buffer, format="PNG", optimize=True)
+                images.append(buffer.getvalue())
+            return images
+        finally:
+            document.close()
 
 
 def parse_document(name: str, content: bytes) -> ParsedDocument:
